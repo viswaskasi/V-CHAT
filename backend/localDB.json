@@ -1,0 +1,26 @@
+{
+  "chats": [
+    {
+      "_id": "1778142536126",
+      "title": "New Chat",
+      "updatedAt": "2026-05-07T08:28:56.126Z"
+    }
+  ],
+  "messages": [
+    {
+      "_id": "1777102597694",
+      "chat": "1777102577862",
+      "role": "user",
+      "content": "hello",
+      "attachment": null,
+      "createdAt": "2026-04-25T07:36:37.694Z"
+    },
+    {
+      "_id": "1777102599051",
+      "chat": "1777102577862",
+      "role": "assistant",
+      "content": "Hello there! V chat at your service. How can I assist you today?",
+      "createdAt": "2026-04-25T07:36:39.051Z"
+    }
+  ]
+}

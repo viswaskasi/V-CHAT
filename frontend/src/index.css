@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+:root {
+  --color-primary: #0a0a0a;
+  --color-secondary: #141414;
+  --color-accent: #3b82f6;
+  --color-border: rgba(255, 255, 255, 0.1);
+}
+
+body {
+  background-color: var(--color-primary);
+  color: #f3f4f6;
+  font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  -webkit-font-smoothing: antialiased;
+}
+
+.glass {
+  background: rgba(20, 20, 20, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@keyframes fade-in-up {
+  0% {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes typing-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.typing-active .prose > *:last-child::after {
+  content: "│";
+  animation: typing-blink 0.7s infinite;
+  margin-left: 2px;
+  color: #f3f4f6;
+  font-weight: 300;
+  display: inline-block;
+}
