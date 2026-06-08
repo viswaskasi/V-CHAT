@@ -1,17 +1,26 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { Send, Mic, Copy, Play, Layout, X, Paperclip } from 'lucide-react';
+import { Send, Mic, Copy, Play, Layout, X, Paperclip, FileText, FileSpreadsheet, Music, Volume2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useStore } from '../store/useStore';
 import { motion, AnimatePresence } from 'framer-motion';
 
+interface Attachment {
+    data: string; // Base64 or text representation
+    fileName: string;
+    mimeType: string;
+    fileSize: number;
+    extractedText?: string;
+}
+
 interface Message {
     _id: string;
     role: 'user' | 'assistant' | 'system';
     content: string;
     attachment?: { data: string, mimeType: string };
+    attachments?: Attachment[];
 }
 
 const VLogo = ({ className = "w-6 h-6" }: { className?: string }) => (
@@ -30,7 +39,7 @@ export default function ChatView() {
 
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
-    const [attachment, setAttachment] = useState<{data: string, mimeType: string} | null>(null);
+    const [attachments, setAttachments] = useState<Attachment[]>([]);
     const [isTyping, setIsTyping] = useState(false);
     const [abortController, setAbortController] = useState<AbortController | null>(null);
     const [isListening, setIsListening] = useState(false);
@@ -39,6 +48,13 @@ export default function ChatView() {
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    // Audio note recording state
+    const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+    const [recordingDuration, setRecordingDuration] = useState(0);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioChunksRef = useRef<Blob[]>([]);
+    const recordingIntervalRef = useRef<any>(null);
+
     const recognitionRef = useRef<any>(null);
 
     useEffect(() => {
@@ -46,19 +62,27 @@ export default function ChatView() {
             fetchMessages().then(() => {
                 const initialMsg = location.state?.initialMessage;
                 const initialAttachment = location.state?.initialAttachment;
+                const initialAttachments = location.state?.initialAttachments;
                 const passedModel = location.state?.selectedModel;
                 
                 if (passedModel) {
                     setSelectedModel(passedModel);
                 }
 
-                if ((initialMsg || initialAttachment) && messages.length === 0) {
+                if ((initialMsg || initialAttachment || initialAttachments) && messages.length === 0) {
                     navigate(location.pathname, { replace: true, state: {} });
                     setInput('');
-                    setAttachment(null);
+                    setAttachments([]);
+                    
+                    let targetAttachments: Attachment[] = [];
+                    if (initialAttachments && Array.isArray(initialAttachments)) {
+                        targetAttachments = initialAttachments;
+                    } else if (initialAttachment) {
+                        targetAttachments = [initialAttachment];
+                    }
                     // Provide the passed model directly to handleSend to ensure it uses the right one
                     // even before state has updated
-                    handleSend(undefined, initialMsg, initialAttachment, passedModel);
+                    handleSend(undefined, initialMsg, targetAttachments, passedModel);
                 }
             });
         } else {
@@ -108,40 +132,177 @@ export default function ChatView() {
     };
 
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
 
-        const reader = new FileReader();
-        reader.onloadend = () => {
-            setAttachment({
-                data: reader.result as string,
-                mimeType: file.type
+        const promises = Array.from(files).map(file => {
+            return new Promise<Attachment>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    let mimeType = file.type;
+                    if (!mimeType) {
+                        const ext = file.name.split('.').pop()?.toLowerCase();
+                        if (ext === 'pdf') mimeType = 'application/pdf';
+                        else if (ext === 'xlsx') mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+                        else if (ext === 'xls') mimeType = 'application/vnd.ms-excel';
+                        else if (ext === 'csv') mimeType = 'text/csv';
+                        else if (ext === 'txt') mimeType = 'text/plain';
+                        else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext || '')) mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+                        else mimeType = 'application/octet-stream';
+                    }
+                    resolve({
+                        data: reader.result as string,
+                        fileName: file.name,
+                        mimeType: mimeType,
+                        fileSize: file.size
+                    });
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
             });
-        };
-        reader.readAsDataURL(file);
+        });
+
+        Promise.all(promises)
+            .then(newAtts => {
+                setAttachments(prev => [...prev, ...newAtts]);
+            })
+            .catch(err => {
+                console.error("Error reading files:", err);
+            });
+
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
     const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
         const items = e.clipboardData.items;
+        let filesToProcess: File[] = [];
+
         for (let i = 0; i < items.length; i++) {
-            if (items[i].type.indexOf('image') !== -1) {
+            if (items[i].kind === 'file') {
                 const file = items[i].getAsFile();
-                if (!file) continue;
-                
+                if (file) {
+                    filesToProcess.push(file);
+                }
+            }
+        }
+
+        if (filesToProcess.length === 0) return;
+
+        e.preventDefault();
+
+        const promises = filesToProcess.map(file => {
+            return new Promise<Attachment>((resolve, reject) => {
                 const reader = new FileReader();
                 reader.onloadend = () => {
-                    setAttachment({
+                    let mimeType = file.type;
+                    if (!mimeType) {
+                        const ext = file.name ? file.name.split('.').pop()?.toLowerCase() : 'png';
+                        if (ext === 'pdf') mimeType = 'application/pdf';
+                        else if (ext === 'xlsx') mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+                        else if (ext === 'xls') mimeType = 'application/vnd.ms-excel';
+                        else if (ext === 'csv') mimeType = 'text/csv';
+                        else if (ext === 'txt') mimeType = 'text/plain';
+                        else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext || '')) mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
+                        else mimeType = 'application/octet-stream';
+                    }
+                    resolve({
                         data: reader.result as string,
-                        mimeType: file.type
+                        fileName: file.name || `pasted_file_${Date.now()}`,
+                        mimeType: mimeType,
+                        fileSize: file.size
                     });
                 };
+                reader.onerror = reject;
                 reader.readAsDataURL(file);
-                e.preventDefault();
-                break;
+            });
+        });
+
+        Promise.all(promises)
+            .then(newAtts => {
+                setAttachments(prev => [...prev, ...newAtts]);
+            })
+            .catch(err => {
+                console.error("Error reading pasted files:", err);
+            });
+    };
+
+    const startAudioRecording = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const mediaRecorder = new MediaRecorder(stream);
+            mediaRecorderRef.current = mediaRecorder;
+            audioChunksRef.current = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    audioChunksRef.current.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const base64Data = reader.result as string;
+                    const newAttachment: Attachment = {
+                        data: base64Data,
+                        fileName: `voice_note_${Date.now()}.webm`,
+                        mimeType: 'audio/webm',
+                        fileSize: audioBlob.size
+                    };
+                    setAttachments(prev => [...prev, newAttachment]);
+                };
+                reader.readAsDataURL(audioBlob);
+                
+                stream.getTracks().forEach(track => track.stop());
+            };
+
+            mediaRecorder.start();
+            setIsRecordingAudio(true);
+            setRecordingDuration(0);
+            recordingIntervalRef.current = setInterval(() => {
+                setRecordingDuration(prev => prev + 1);
+            }, 1000);
+        } catch (err) {
+            console.error("Failed to start audio recording", err);
+            alert("Could not access microphone for voice note recording.");
+        }
+    };
+
+    const stopAudioRecording = () => {
+        if (mediaRecorderRef.current && isRecordingAudio) {
+            mediaRecorderRef.current.stop();
+            setIsRecordingAudio(false);
+            if (recordingIntervalRef.current) {
+                clearInterval(recordingIntervalRef.current);
+                recordingIntervalRef.current = null;
             }
         }
     };
+
+    const cancelAudioRecording = () => {
+        if (mediaRecorderRef.current && isRecordingAudio) {
+            mediaRecorderRef.current.onstop = null;
+            mediaRecorderRef.current.stop();
+            setIsRecordingAudio(false);
+            if (recordingIntervalRef.current) {
+                clearInterval(recordingIntervalRef.current);
+                recordingIntervalRef.current = null;
+            }
+            if (mediaRecorderRef.current.stream) {
+                mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+            }
+        }
+    };
+
+    // Clean up interval on unmount
+    useEffect(() => {
+        return () => {
+            if (recordingIntervalRef.current) {
+                clearInterval(recordingIntervalRef.current);
+            }
+        };
+    }, []);
 
     const handleStop = () => {
         if (abortController) {
@@ -151,19 +312,19 @@ export default function ChatView() {
         }
     };
 
-    const handleSend = async (e?: React.FormEvent, initialMessageText?: string, initialAttachment?: {data: string, mimeType: string} | null, forceModel?: string) => {
+    const handleSend = async (e?: React.FormEvent, initialMessageText?: string, initialAttachments?: Attachment[], forceModel?: string) => {
         e?.preventDefault();
         const textToSend = initialMessageText !== undefined ? initialMessageText : input.trim();
-        const currentAttachment = initialAttachment !== undefined ? initialAttachment : attachment;
+        const currentAttachments = initialAttachments !== undefined ? initialAttachments : attachments;
         const modelToUse = forceModel || selectedModel;
 
-        if (!textToSend && !currentAttachment) return;
+        if (!textToSend && currentAttachments.length === 0) return;
 
         if (!id) {
             try {
                 setInput('');
-                setAttachment(null);
-                const reqTitle = textToSend.length > 20 ? textToSend.substring(0, 20) + '...' : (textToSend || 'New Image Chat');
+                setAttachments([]);
+                const reqTitle = textToSend.length > 20 ? textToSend.substring(0, 20) + '...' : (textToSend || 'New Chat');
                 const res = await fetch(`http://${window.location.hostname}:5000/api/chats`, {
                     method: 'POST',
                     headers: {
@@ -174,7 +335,7 @@ export default function ChatView() {
                 if (res.ok) {
                     const newChat = await res.json();
                     setChats([newChat, ...chats]);
-                    navigate(`/c/${newChat._id}`, { state: { initialMessage: textToSend, initialAttachment: currentAttachment, selectedModel } });
+                    navigate(`/c/${newChat._id}`, { state: { initialMessage: textToSend, initialAttachments: currentAttachments, selectedModel } });
                 }
             } catch (err) {
                 console.error(err);
@@ -182,11 +343,11 @@ export default function ChatView() {
             return;
         }
 
-        const userMessage: Message = { _id: Date.now().toString(), role: 'user', content: textToSend, attachment: currentAttachment || undefined };
+        const userMessage: Message = { _id: Date.now().toString(), role: 'user', content: textToSend, attachments: currentAttachments };
         setMessages(prev => [...prev, userMessage]);
         if (initialMessageText === undefined) {
             setInput('');
-            setAttachment(null);
+            setAttachments([]);
         }
         setIsTyping(true);
 
@@ -200,7 +361,7 @@ export default function ChatView() {
                     'Content-Type': 'application/json'
                 },
                 signal: controller.signal,
-                body: JSON.stringify({ chatId: id, message: textToSend, attachment: currentAttachment, personality: 'assistant', provider: modelToUse })
+                body: JSON.stringify({ chatId: id, message: textToSend, attachments: currentAttachments, personality: 'assistant', provider: modelToUse })
             });
 
             if (!res.ok) throw new Error('API Error');
@@ -335,20 +496,71 @@ export default function ChatView() {
         <div className={isFixed ? "fixed bottom-0 left-0 right-0 p-3 pb-6 md:p-8 bg-gradient-to-t from-[#050505] via-[#050505]/80 to-transparent pointer-events-none z-50" : "w-full pointer-events-none z-50 px-2 pb-4 md:pb-6 shrink-0 pt-2 bg-gradient-to-t from-[#050505] to-transparent"}>
             <form onSubmit={handleSend} className="max-w-3xl mx-auto flex flex-col gap-2 glass rounded-[24px] md:rounded-[32px] p-1.5 md:p-2 focus-within:ring-1 focus-within:ring-white/20 transition-all shadow-[0_8px_32px_rgba(0,0,0,0.5)] pointer-events-auto backdrop-blur-2xl bg-white/5 border border-white/10">
 
-                {attachment && (
-                    <div className="relative w-16 h-16 ml-3 mt-2 rounded-xl overflow-hidden border border-white/20 group shrink-0">
-                        <img src={attachment.data} className="w-full h-full object-cover" alt="Attachment preview" />
-                        <button type="button" onClick={() => setAttachment(null)} className="absolute top-1 right-1 bg-black/60 p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
-                            <X size={12} className="text-white" />
-                        </button>
+                {attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-2 px-3 pt-2 pb-1 max-h-40 overflow-y-auto scrollbar-hide border-b border-white/5">
+                        {attachments.map((att, idx) => {
+                            const isImage = att.mimeType.startsWith('image/');
+                            const isAudio = att.mimeType.startsWith('audio/');
+                            const isPdf = att.mimeType === 'application/pdf' || att.fileName.toLowerCase().endsWith('.pdf');
+                            const isSpreadsheet = att.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                                                  att.mimeType === 'application/vnd.ms-excel' ||
+                                                  att.mimeType === 'text/csv' ||
+                                                  att.fileName.toLowerCase().endsWith('.xlsx') ||
+                                                  att.fileName.toLowerCase().endsWith('.xls') ||
+                                                  att.fileName.toLowerCase().endsWith('.csv');
+
+                            return (
+                                <div 
+                                    key={idx} 
+                                    className="relative flex items-center gap-2 bg-white/5 border border-white/10 rounded-xl p-1.5 pr-8 max-w-[200px] group transition-all hover:bg-white/10 hover:border-white/20 animate-fade-in"
+                                >
+                                    {isImage ? (
+                                        <div className="w-8 h-8 rounded-lg overflow-hidden shrink-0">
+                                            <img src={att.data} className="w-full h-full object-cover" alt={att.fileName} />
+                                        </div>
+                                    ) : (
+                                        <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center shrink-0 text-white/70">
+                                            {isPdf ? (
+                                                <FileText size={16} className="text-red-400" />
+                                            ) : isSpreadsheet ? (
+                                                <FileSpreadsheet size={16} className="text-emerald-400" />
+                                            ) : isAudio ? (
+                                                <Music size={16} className="text-blue-400 animate-pulse" />
+                                            ) : (
+                                                <FileText size={16} className="text-purple-400" />
+                                            )}
+                                        </div>
+                                    )}
+                                    <div className="flex flex-col min-w-0">
+                                        <span className="text-xs text-white/90 truncate font-medium max-w-[100px]">{att.fileName}</span>
+                                        <span className="text-[10px] text-gray-500">{(att.fileSize ? (att.fileSize / 1024).toFixed(1) : 0)} KB</span>
+                                    </div>
+                                    <button 
+                                        type="button" 
+                                        onClick={() => setAttachments(prev => prev.filter((_, i) => i !== idx))} 
+                                        className="absolute top-1/2 right-1.5 -translate-y-1/2 bg-black/60 hover:bg-black/80 p-1 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                    >
+                                        <X size={10} className="text-white" />
+                                    </button>
+                                </div>
+                            );
+                        })}
                     </div>
                 )}
                 <div className="flex items-end gap-2 md:gap-3 w-full pr-2 md:pr-3">
-                    <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileSelect} />
+                    <input 
+                        type="file" 
+                        ref={fileInputRef} 
+                        className="hidden" 
+                        multiple 
+                        accept="image/*,application/pdf,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel,.xls,text/csv,.csv,text/*,.txt,application/json,.json,application/javascript,.js,.py,audio/*,.mp3,.wav,.webm" 
+                        onChange={handleFileSelect} 
+                    />
                     <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        className="p-2.5 md:p-3.5 rounded-full text-gray-400 hover:text-white hover:bg-white/5 transition-all"
+                        className="p-2.5 md:p-3.5 rounded-full text-gray-400 hover:text-white hover:bg-white/5 transition-all animate-fade-in"
+                        title="Attach files (PDF, Spreadsheets, Images, Audio, Text)"
                     >
                         <Paperclip size={20} />
                     </button>
@@ -356,25 +568,63 @@ export default function ChatView() {
                         type="button"
                         onClick={toggleListen}
                         className={`p-2.5 md:p-3.5 rounded-full transition-all ${isListening ? 'bg-red-500/20 text-red-500 scale-105' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+                        title="Dictate message (Speech-to-Text)"
                     >
                         <Mic size={20} />
                     </button>
+                    
+                    <button
+                        type="button"
+                        onClick={isRecordingAudio ? stopAudioRecording : startAudioRecording}
+                        className={`p-2.5 md:p-3.5 rounded-full transition-all ${isRecordingAudio ? 'bg-red-500/20 text-red-500 scale-105' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+                        title="Record voice note"
+                    >
+                        <Volume2 size={20} />
+                    </button>
 
-                <textarea
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            if (!isTyping) handleSend();
-                        }
-                    }}
-                    onPaste={handlePaste}
-                    placeholder="Ask anything..."
-                    className="flex-1 bg-transparent border-none outline-none resize-none max-h-40 min-h-[40px] md:min-h-[44px] py-2.5 md:py-3.5 px-2 text-[14px] md:text-base scrollbar-hide text-white/90 placeholder-gray-500"
-                    rows={1}
-                    style={{ height: 'auto' }}
-                />
+                {isRecordingAudio ? (
+                    <div className="flex-1 flex items-center justify-between px-4 py-2 bg-red-500/10 border border-red-500/20 rounded-2xl animate-pulse">
+                        <div className="flex items-center gap-3">
+                            <span className="relative flex h-3 w-3">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                            </span>
+                            <span className="text-sm font-medium text-red-400 tracking-wider">Recording Voice Note... ({recordingDuration}s)</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={cancelAudioRecording}
+                                className="text-gray-400 hover:text-white text-xs px-2.5 py-1 hover:bg-white/5 rounded-lg transition-all"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={stopAudioRecording}
+                                className="bg-red-500 text-white text-xs px-3 py-1.5 rounded-lg hover:bg-red-600 transition-all font-semibold"
+                            >
+                                Stop & Queue
+                            </button>
+                        </div>
+                    </div>
+                ) : (
+                    <textarea
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                                e.preventDefault();
+                                if (!isTyping) handleSend();
+                            }
+                        }}
+                        onPaste={handlePaste}
+                        placeholder="Ask anything..."
+                        className="flex-1 bg-transparent border-none outline-none resize-none max-h-40 min-h-[40px] md:min-h-[44px] py-2.5 md:py-3.5 px-2 text-[14px] md:text-base scrollbar-hide text-white/90 placeholder-gray-500"
+                        rows={1}
+                        style={{ height: 'auto' }}
+                    />
+                )}
 
                 <select 
                     value={selectedModel}
@@ -397,7 +647,7 @@ export default function ChatView() {
                 ) : (
                     <button
                         type="submit"
-                        disabled={(!input.trim() && !attachment)}
+                        disabled={(!input.trim() && attachments.length === 0)}
                         className="p-2.5 md:p-3 bg-white text-black rounded-full hover:bg-gray-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed group flex-shrink-0 w-[38px] h-[38px] md:w-[42px] md:h-[42px] flex items-center justify-center"
                     >
                         <Send size={18} className="translate-x-0.5 -translate-y-0.5" />
@@ -628,7 +878,78 @@ export default function ChatView() {
                                         : 'bg-transparent py-2 w-full pl-0 md:pl-8'
                                         }`}>
 
-                                        {msg.attachment && (
+                                        {msg.attachments && msg.attachments.length > 0 && (
+                                            <div className="flex flex-col gap-2 mb-3 max-w-full">
+                                                {msg.attachments.map((att, attIdx) => {
+                                                    const isImage = att.mimeType.startsWith('image/');
+                                                    const isAudio = att.mimeType.startsWith('audio/');
+                                                    const isPdf = att.mimeType === 'application/pdf' || att.fileName.toLowerCase().endsWith('.pdf');
+                                                    const isSpreadsheet = att.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                                                                          att.mimeType === 'application/vnd.ms-excel' ||
+                                                                          att.mimeType === 'text/csv' ||
+                                                                          att.fileName.toLowerCase().endsWith('.xlsx') ||
+                                                                          att.fileName.toLowerCase().endsWith('.xls') ||
+                                                                          att.fileName.toLowerCase().endsWith('.csv');
+
+                                                    if (isImage) {
+                                                        return (
+                                                            <div key={attIdx} className="max-w-[200px] md:max-w-[300px] rounded-xl overflow-hidden shadow-lg border border-white/10 group relative">
+                                                                <img src={att.data} alt={att.fileName || 'Attachment'} className="w-full h-auto object-cover max-h-[300px]" />
+                                                                <a 
+                                                                    href={att.data} 
+                                                                    download={att.fileName || 'image.png'}
+                                                                    className="absolute bottom-2 right-2 bg-black/70 hover:bg-black/95 text-white/90 text-xs px-2.5 py-1 rounded-lg border border-white/10 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                                >
+                                                                    Download
+                                                                </a>
+                                                            </div>
+                                                        );
+                                                    }
+
+                                                    if (isAudio) {
+                                                        return (
+                                                            <div key={attIdx} className="flex flex-col gap-1.5 p-3 rounded-2xl bg-white/5 border border-white/10 max-w-xs shadow-md">
+                                                                <div className="flex items-center gap-2 text-blue-400">
+                                                                    <Music size={16} />
+                                                                    <span className="text-xs font-semibold truncate text-white/95">{att.fileName || 'Voice Note'}</span>
+                                                                </div>
+                                                                <audio src={att.data} controls className="w-full h-8 opacity-80 animate-fade-in" />
+                                                            </div>
+                                                        );
+                                                    }
+
+                                                    return (
+                                                        <a
+                                                            key={attIdx}
+                                                            href={att.data}
+                                                            download={att.fileName || 'document'}
+                                                            className="flex items-center gap-3 p-3 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 hover:border-white/20 transition-all max-w-sm group text-left cursor-pointer"
+                                                        >
+                                                            <div className="w-10 h-10 rounded-lg bg-white/10 flex items-center justify-center shrink-0 text-white/70">
+                                                                {isPdf ? (
+                                                                    <FileText size={20} className="text-red-400" />
+                                                                ) : isSpreadsheet ? (
+                                                                    <FileSpreadsheet size={20} className="text-emerald-400" />
+                                                                ) : (
+                                                                    <FileText size={20} className="text-purple-400" />
+                                                                )}
+                                                            </div>
+                                                            <div className="flex flex-col min-w-0 flex-1">
+                                                                <span className="text-sm text-white/90 font-medium truncate group-hover:text-white transition-colors">{att.fileName}</span>
+                                                                <span className="text-xs text-gray-500">
+                                                                    {att.fileSize ? `${(att.fileSize / 1024).toFixed(1)} KB` : 'Document'}
+                                                                </span>
+                                                            </div>
+                                                            <div className="text-xs text-blue-400 font-semibold group-hover:underline ml-2">
+                                                                Download
+                                                            </div>
+                                                        </a>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+
+                                        {!msg.attachments && msg.attachment && (
                                             <div className="mb-3 max-w-[200px] md:max-w-[300px] rounded-xl overflow-hidden shadow-lg border border-white/10">
                                                 <img src={msg.attachment.data} alt="Attachment" className="w-full h-auto object-cover" />
                                             </div>

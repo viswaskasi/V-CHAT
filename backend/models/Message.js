@@ -9,6 +9,13 @@ const messageSchema = new mongoose.Schema({
         data: { type: String }, // Base64 encoded image data
         mimeType: { type: String }
     },
+    attachments: [{
+        data: { type: String }, // Base64 or raw data representation
+        fileName: { type: String },
+        mimeType: { type: String },
+        fileSize: { type: Number },
+        extractedText: { type: String } // Extracted plain text for LLM/Offline model queries
+    }],
     embedding: { type: [Number], required: false }, // Vector embedding for semantic search
 }, { timestamps: true });
 

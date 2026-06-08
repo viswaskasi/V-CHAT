@@ -9,6 +9,7 @@ import path from 'path';
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { getAgentTools } from '../tools/agentTools.js';
 import { queryOfflineModelStream, learnPair } from '../services/offlineModelService.js';
+import { parseAttachment } from '../services/fileParserService.js';
 
 let llmClient;
 const initializeGenerativeClient = () => {
@@ -195,10 +196,44 @@ Do NOT say you cannot access the internet or run code—YOU CAN. Use these tools
 **CRITICAL RULE FOR TOOLS**: When you use a tool (Search or Code), you MUST NOT write a huge essay. Your response must be EXTREMELY concise (1-2 sentences) giving just the direct answer, UNLESS the user explicitly asks for a detailed or long explanation. Provide mostly small, direct responses for better performance.`;
 
 export const handleChatStream = async (req, res) => {
-    const { chatId, message, attachment, provider = 'gemini' } = req.body;
-    if (!message && !attachment) return res.status(400).json({ message: 'Message or attachment is required' });
+    const { chatId, message, attachment, attachments, provider = 'gemini' } = req.body;
+    if (!message && !attachment && (!attachments || attachments.length === 0)) {
+        return res.status(400).json({ message: 'Message or attachment is required' });
+    }
 
-    const userMsg = { chat: chatId, role: 'user', content: message || '', attachment, createdAt: new Date() };
+    // Process multiple attachments
+    let finalAttachments = [];
+    if (attachments && Array.isArray(attachments)) {
+        finalAttachments = attachments;
+    } else if (attachment && attachment.data) {
+        finalAttachments = [attachment];
+    }
+
+    const parsedAttachments = [];
+    for (const att of finalAttachments) {
+        let extractedText = '';
+        if (att.data) {
+            if (att.mimeType && !att.mimeType.startsWith('image/')) {
+                extractedText = await parseAttachment(att.data, att.mimeType);
+            }
+            parsedAttachments.push({
+                data: att.data,
+                fileName: att.fileName || 'file',
+                mimeType: att.mimeType,
+                fileSize: att.fileSize || 0,
+                extractedText
+            });
+        }
+    }
+
+    const userMsg = { 
+        chat: chatId, 
+        role: 'user', 
+        content: message || '', 
+        attachment: attachment || null, 
+        attachments: parsedAttachments, 
+        createdAt: new Date() 
+    };
 
     try {
         const m = await import('mongoose');
@@ -230,7 +265,7 @@ export const handleChatStream = async (req, res) => {
 
     if (provider === 'offline') {
         try {
-            const fullOutput = await queryOfflineModelStream(message || '', res);
+            const fullOutput = await queryOfflineModelStream(message || '', res, parsedAttachments);
             try {
                 const m = await import('mongoose');
                 if (m.default.connection.readyState === 1) {
@@ -300,40 +335,70 @@ export const handleChatStream = async (req, res) => {
             if (msg.role === 'assistant') {
                 messages.push(new AIMessage(msg.content));
             } else {
-                let content = msg.content || "";
-                if (msg.attachment && msg.attachment.data) {
+                const contentParts = [];
+                let textContent = msg.content || "";
+
+                // Inject extracted text from documents
+                if (msg.attachments && msg.attachments.length > 0) {
+                    msg.attachments.forEach(att => {
+                        if (att.extractedText) {
+                            textContent = `[Attached Document: ${att.fileName || 'file'}]\n--- START OF FILE CONTENT ---\n${att.extractedText}\n--- END OF FILE CONTENT ---\n\n` + textContent;
+                        }
+                    });
+                }
+
+                contentParts.push({ type: "text", text: textContent });
+
+                // Map images natively
+                if (msg.attachments && msg.attachments.length > 0) {
+                    msg.attachments.forEach(att => {
+                        if (att.mimeType && att.mimeType.startsWith('image/')) {
+                            const base64Data = att.data.includes(',') 
+                                ? att.data.split(',')[1] 
+                                : att.data;
+                            contentParts.push({ 
+                                type: "image_url", 
+                                image_url: { url: `data:${att.mimeType};base64,${base64Data}` } 
+                            });
+                        }
+                    });
+                } else if (msg.attachment && msg.attachment.data) {
+                    // Fallback for legacy single attachment
                     const base64Data = msg.attachment.data.includes(',') 
                         ? msg.attachment.data.split(',')[1] 
                         : msg.attachment.data;
-                    
-                    content = [
-                        { type: "text", text: msg.content || "" },
-                        { 
-                            type: "image_url", 
-                            image_url: { url: `data:${msg.attachment.mimeType || 'image/jpeg'};base64,${base64Data}` } 
-                        }
-                    ];
+                    contentParts.push({ 
+                        type: "image_url", 
+                        image_url: { url: `data:${msg.attachment.mimeType || 'image/jpeg'};base64,${base64Data}` } 
+                    });
                 }
-                messages.push(new HumanMessage({ content }));
+
+                const finalContent = contentParts.length === 1 ? contentParts[0].text : contentParts;
+                messages.push(new HumanMessage({ content: finalContent }));
             }
         }
 
         // Safety fallback: Google Generative AI requires at least one user/human message in the request.
         if (messages.length <= 1) {
-            let content = message || "";
-            if (attachment && attachment.data) {
-                const base64Data = attachment.data.includes(',') 
-                    ? attachment.data.split(',')[1] 
-                    : attachment.data;
-                content = [
-                    { type: "text", text: message || "" },
-                    { 
+            const contentParts = [{ type: "text", text: message || "" }];
+            
+            parsedAttachments.forEach(att => {
+                if (att.extractedText) {
+                    contentParts[0].text = `[Attached Document: ${att.fileName || 'file'}]\n--- START OF FILE CONTENT ---\n${att.extractedText}\n--- END OF FILE CONTENT ---\n\n` + contentParts[0].text;
+                }
+                if (att.mimeType && att.mimeType.startsWith('image/')) {
+                    const base64Data = att.data.includes(',') 
+                        ? att.data.split(',')[1] 
+                        : att.data;
+                    contentParts.push({ 
                         type: "image_url", 
-                        image_url: { url: `data:${attachment.mimeType || 'image/jpeg'};base64,${base64Data}` } 
-                    }
-                ];
-            }
-            messages.push(new HumanMessage({ content }));
+                        image_url: { url: `data:${att.mimeType};base64,${base64Data}` } 
+                    });
+                }
+            });
+
+            const finalContent = contentParts.length === 1 ? contentParts[0].text : contentParts;
+            messages.push(new HumanMessage({ content: finalContent }));
         }
 
         const tools = getAgentTools();
@@ -369,7 +434,7 @@ export const handleChatStream = async (req, res) => {
 
         // Offline ML learning hook
         try {
-            await learnPair(message || '', fullOutput || '');
+            await learnPair(message || '', fullOutput || '', parsedAttachments);
         } catch (err) {
             console.error("Offline learning failed:", err);
         }

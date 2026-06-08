@@ -5,23 +5,36 @@ import Message from '../models/Message.js';
 
 const brainPath = path.resolve(process.cwd(), 'offlineBrain.json');
 
-// Simple TF-IDF Vector Space Machine Learning Model in pure JS
+const STOP_WORDS = new Set([
+    'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 
+    'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after', 'above', 'below', 'from', 'up', 'down', 
+    'out', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 'why', 'how', 
+    'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 
+    'same', 'so', 'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', 'should', 'now', 'what', 'this', 
+    'that', 'these', 'those', 'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 'your', 'yours', 
+    'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', 'her', 'hers', 'herself', 'it', 'its', 'itself', 
+    'they', 'them', 'their', 'theirs', 'themselves', 'which', 'who', 'whom', 'am', 'be', 'been', 'being', 'have', 
+    'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'if', 'because', 'as', 'until', 'while'
+]);
+
+// Simple TF-IDF Vector Space Machine Learning Model in pure JS with stop words and hybrid matching
 class SimpleTFIDFModel {
     constructor() {
-        this.documents = []; // Array of { text: string, answer: string, type: string }
+        this.documents = []; // Array of { text: string, trainingText?: string, answer: string, type: string }
         this.vocabulary = new Set();
         this.idf = {};
-        this.docVectors = [];
+        this.textVectors = [];
+        this.trainingVectors = [];
     }
 
-    // Tokenize, lowercase, and clean text
+    // Tokenize, lowercase, and clean text, filtering out stop words
     tokenize(text) {
         if (!text) return [];
         return text
             .toLowerCase()
             .replace(/[^\w\s]/g, ' ')
             .split(/\s+/)
-            .filter(word => word.length > 1); // Skip very short words/empty tokens
+            .filter(word => word.length > 1 && !STOP_WORDS.has(word));
     }
 
     // Train/build model with documents
@@ -29,15 +42,18 @@ class SimpleTFIDFModel {
         this.documents = docs;
         this.vocabulary.clear();
         this.idf = {};
-        this.docVectors = [];
+        this.textVectors = [];
+        this.trainingVectors = [];
 
         // 1. Build vocabulary and compute document frequencies (DF)
         const df = {};
         const N = this.documents.length;
 
         this.documents.forEach(doc => {
-            const tokens = this.tokenize(doc.text);
-            const uniqueTokens = new Set(tokens);
+            const tokensText = this.tokenize(doc.text);
+            const tokensTraining = this.tokenize(doc.trainingText || doc.text);
+            
+            const uniqueTokens = new Set([...tokensText, ...tokensTraining]);
             uniqueTokens.forEach(token => {
                 this.vocabulary.add(token);
                 df[token] = (df[token] || 0) + 1;
@@ -49,11 +65,13 @@ class SimpleTFIDFModel {
             this.idf[token] = Math.log(N / (df[token] || 1)) + 1;
         });
 
-        // 3. Compute TF-IDF vectors for all documents
+        // 3. Compute TF-IDF vectors for all documents (both text and trainingText fields)
         this.documents.forEach(doc => {
-            const tokens = this.tokenize(doc.text);
-            const vector = this.computeTFIDFVector(tokens);
-            this.docVectors.push(vector);
+            const tokensText = this.tokenize(doc.text);
+            const tokensTraining = this.tokenize(doc.trainingText || doc.text);
+            
+            this.textVectors.push(this.computeTFIDFVector(tokensText));
+            this.trainingVectors.push(this.computeTFIDFVector(tokensTraining));
         });
     }
 
@@ -104,7 +122,7 @@ class SimpleTFIDFModel {
         return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
     }
 
-    // Query the model to find the best matching answer
+    // Query the model to find the best matching answer (hybrid scoring)
     query(queryText, threshold = 0.05) {
         if (this.documents.length === 0) {
             return null;
@@ -115,19 +133,25 @@ class SimpleTFIDFModel {
 
         let bestIndex = -1;
         let bestScore = -1;
+        let matchedField = "";
 
-        this.docVectors.forEach((docVector, index) => {
-            const score = this.cosineSimilarity(queryVector, docVector);
-            if (score > bestScore) {
-                bestScore = score;
+        this.documents.forEach((doc, index) => {
+            const scoreText = this.cosineSimilarity(queryVector, this.textVectors[index]);
+            const scoreTraining = this.cosineSimilarity(queryVector, this.trainingVectors[index]);
+            
+            const maxScore = Math.max(scoreText, scoreTraining);
+            if (maxScore > bestScore) {
+                bestScore = maxScore;
                 bestIndex = index;
+                matchedField = scoreText >= scoreTraining ? "Question Text" : "Training Text";
             }
         });
 
         if (bestIndex !== -1 && bestScore >= threshold) {
             return {
                 document: this.documents[bestIndex],
-                score: bestScore
+                score: bestScore,
+                matchedField: matchedField
             };
         }
 
@@ -160,27 +184,58 @@ const saveBrain = (data) => {
 };
 
 // Learn a new Q&A pair in real time
-export const learnPair = async (question, answer) => {
-    if (!question || !answer) return;
+export const learnPair = async (question, answer, attachments = []) => {
+    if (!question && (!attachments || attachments.length === 0)) return;
+    if (!answer) return;
     
-    // Ignore short messages, errors, or mock responses
-    if (question.trim().length <= 3) return;
+    // Ignore short messages or errors
+    if (question && question.trim().length <= 3 && (!attachments || attachments.length === 0)) return;
     if (answer.includes("API Error:") || answer.includes("Offline ML Model")) return;
 
     const brain = loadBrain();
 
-    // Check if we already have this exact query (case-insensitive)
-    const exists = brain.some(item => item.text.toLowerCase().trim() === question.toLowerCase().trim());
+    // Check if we already have this exact query (case-insensitive) and update or add it
+    const normalizedQuestion = (question || '').toLowerCase().trim();
+    const existingIndex = brain.findIndex(item => item.text.toLowerCase().trim() === normalizedQuestion);
     
-    if (!exists) {
-        brain.push({
-            text: question.trim(),
+    let trainingText = (question || '').trim();
+    const documentExtracts = [];
+    
+    if (attachments && attachments.length > 0) {
+        attachments.forEach(att => {
+            if (att.extractedText) {
+                trainingText += " " + att.extractedText;
+                documentExtracts.push({
+                    fileName: att.fileName,
+                    content: att.extractedText
+                });
+            }
+        });
+    }
+
+    if (existingIndex !== -1) {
+        // Update the existing entry with the new answer and training text
+        brain[existingIndex] = {
+            ...brain[existingIndex],
+            trainingText: trainingText,
             answer: answer.trim(),
+            attachments: documentExtracts,
+            updatedAt: new Date()
+        };
+        saveBrain(brain);
+        console.log(`[Offline ML Model] Updated existing Q&A pair: "${(question || '').substring(0, 30)}..."`);
+    } else {
+        // Create a new entry
+        brain.push({
+            text: (question || '').trim(),
+            trainingText: trainingText, // For TF-IDF index
+            answer: answer.trim(),
+            attachments: documentExtracts,
             type: "conversation",
             learnedAt: new Date()
         });
         saveBrain(brain);
-        console.log(`[Offline ML Model] Learned new Q&A pair: "${question.substring(0, 30)}..."`);
+        console.log(`[Offline ML Model] Learned new Q&A pair with attachments: "${(question || '').substring(0, 30)}..."`);
     }
 };
 
@@ -234,12 +289,33 @@ export const migrateHistoryToBrain = async () => {
                 const next = chatMsgs[i + 1];
 
                 if (current.role === 'user' && next.role === 'assistant') {
-                    if (current.content && current.content.length > 3 && next.content && !next.content.includes("API Error:")) {
-                        // Avoid duplicates
-                        if (!knowledge.some(item => item.text.toLowerCase().trim() === current.content.toLowerCase().trim())) {
+                    const isErrorResponse = next.content.includes("API Error:") || 
+                                            next.content.toLowerCase().includes("unable to extract") || 
+                                            next.content.toLowerCase().includes("error extracting text") || 
+                                            next.content.includes("Offline ML Model");
+                    if ((current.content || (current.attachments && current.attachments.length > 0)) && next.content && !isErrorResponse) {
+                        const qText = current.content || "";
+                        if (!knowledge.some(item => item.text.toLowerCase().trim() === qText.toLowerCase().trim())) {
+                            let trainingText = qText.trim();
+                            const documentExtracts = [];
+                            
+                            if (current.attachments && current.attachments.length > 0) {
+                                current.attachments.forEach(att => {
+                                    if (att.extractedText) {
+                                        trainingText += " " + att.extractedText;
+                                        documentExtracts.push({
+                                            fileName: att.fileName,
+                                            content: att.extractedText
+                                        });
+                                    }
+                                });
+                            }
+
                             knowledge.push({
-                                text: current.content.trim(),
+                                text: qText.trim(),
+                                trainingText: trainingText,
                                 answer: next.content.trim(),
+                                attachments: documentExtracts,
                                 type: "conversation",
                                 learnedAt: current.createdAt || new Date()
                             });
@@ -311,8 +387,8 @@ const loadEnvKnowledge = () => {
     return { knowledge, geminiKey };
 };
 
-// Build/retrain the offline model combining environment keys and persistent brain data
-export const retrainOfflineModel = async () => {
+// Build/retrain the offline model combining environment keys, persistent brain data, and any temporary query attachments
+export const retrainOfflineModel = async (tempAttachments = []) => {
     try {
         // Run migration from history if it's the first time
         await migrateHistoryToBrain();
@@ -320,42 +396,59 @@ export const retrainOfflineModel = async () => {
         const { knowledge } = loadEnvKnowledge();
         const brain = loadBrain();
 
-        // Combine config info with persistent conversation learnings
-        const allDocs = [...knowledge, ...brain];
+        // If there are tempAttachments (files uploaded in offline mode), index and append them
+        const tempDocs = [];
+        if (tempAttachments && tempAttachments.length > 0) {
+            tempAttachments.forEach(att => {
+                if (att.extractedText) {
+                    tempDocs.push({
+                        text: `what is in ${att.fileName} search document content ${att.fileName}`,
+                        trainingText: `what is in ${att.fileName} search document content ${att.fileName} ${att.extractedText}`,
+                        answer: `From document [${att.fileName}]:\n\n${att.extractedText}`,
+                        type: "document_content"
+                    });
+                }
+            });
+        }
+
+        // Combine config info, persistent brain memory, and active session attachments
+        const allDocs = [...knowledge, ...brain, ...tempDocs];
 
         offlineModel.train(allDocs);
-        console.log(`[Offline ML Model] Trained model on ${allDocs.length} documents (${knowledge.length} env config, ${brain.length} brain memory).`);
+        console.log(`[Offline ML Model] Trained model on ${allDocs.length} items (${knowledge.length} env config, ${brain.length} brain memory, ${tempDocs.length} temp attachments).`);
     } catch (err) {
         console.error("Failed to retrain offline model:", err);
     }
 };
 
 // Query the offline model to get a streamed/event-source answer
-export const queryOfflineModelStream = async (queryText, res) => {
-    // Make sure we have the latest training data loaded
-    await retrainOfflineModel();
+export const queryOfflineModelStream = async (queryText, res, queryAttachments = []) => {
+    // Make sure we have the latest training data loaded, including current attachments
+    await retrainOfflineModel(queryAttachments);
 
     const match = offlineModel.query(queryText);
 
     let answer = "";
     if (match) {
         const sourceLabel = match.document.type === "api_key" ? "Environment Keys" : 
-                            match.document.type === "config" ? "Server Configuration" : "Persistent Brain Memory";
+                            match.document.type === "config" ? "Server Configuration" : 
+                            match.document.type === "document_content" ? "Uploaded Document Content" : `Persistent Brain Memory (${match.matchedField})`;
         answer = `🤖 **[Offline ML Model - Match found in ${sourceLabel}]** (Confidence: ${Math.round(match.score * 100)}%)\n\n${match.document.answer}`;
     } else {
-        answer = `🔌 **[Offline ML Model - Fully Local Fallback]**\n\nI am currently operating in **Offline Mode** (meaning I cannot query external generative models).\n\nI couldn't find a sufficiently close match for your question: *"${queryText}"* in my local training data.\n\n### What can I answer here?\n- Ask me about the environment settings (e.g. "What is my API key?", "What is the MongoDB URI?", "What port is the server running on?")\n- Ask me questions that you previously asked while Gemini was online, and I will retrieve the exact answers from our chat history!`;
+        answer = `🔌 **[Offline ML Model - Fully Local Fallback]**\n\nI am currently operating in **Offline Mode** (meaning I cannot query external generative models).\n\nI couldn't find a sufficiently close match for your question: *"${queryText}"* in my local training data.\n\n### What can I answer here?\n- Ask me about the environment settings (e.g. "What is my API key?", "What is the MongoDB URI?", "What port is the server running on?")\n- Ask me about the contents of files you uploaded (e.g. "What is in my document?")\n- Ask me questions that you previously asked while Gemini was online, and I will retrieve the exact answers from our chat history!`;
     }
 
-    // Stream the response out word-by-word to match the event-stream UI formatting
+    // Stream the response out in small chunks of words to make it extremely fast and smooth
     const words = answer.split(' ');
     let currentResponse = "";
+    const wordsPerChunk = 4;
     
-    for (let i = 0; i < words.length; i++) {
-        const chunk = words[i] + ' ';
+    for (let i = 0; i < words.length; i += wordsPerChunk) {
+        const chunk = words.slice(i, i + wordsPerChunk).join(' ') + ' ';
         currentResponse += chunk;
         res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
-        // Simulate small streaming delay
-        await new Promise(resolve => setTimeout(resolve, 30));
+        // Small delay to let UI render the stream smoothly
+        await new Promise(resolve => setTimeout(resolve, 5));
     }
 
     res.write('data: [DONE]\n\n');

@@ -4,3 +4,6 @@ node_modules
 !.env.example
 __pycache__/
 *.pyc
+localDB.json
+offlineBrain.json
+

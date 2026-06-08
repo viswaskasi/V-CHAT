@@ -6,6 +6,7 @@ import { storeMemory, retrieveRelevantMemories } from '../services/memoryService
 import fs from 'fs';
 import path from 'path';
 import { queryOfflineModelStream, learnPair } from '../services/offlineModelService.js';
+import { parseAttachment } from '../services/fileParserService.js';
 
 let llmClient;
 const initializeGenerativeClient = () => {
@@ -97,10 +98,44 @@ export const getMessages = async (req, res) => {
 };
 
 export const handleChatStream = async (req, res) => {
-    const { chatId, message, attachment, personality = 'assistant', provider = 'gemini' } = req.body;
-    if (!message && !attachment) return res.status(400).json({ message: 'Message or attachment is required' });
+    const { chatId, message, attachment, attachments, personality = 'assistant', provider = 'gemini' } = req.body;
+    if (!message && !attachment && (!attachments || attachments.length === 0)) {
+        return res.status(400).json({ message: 'Message or attachment is required' });
+    }
 
-    const userMsg = { chat: chatId, role: 'user', content: message || '', attachment, createdAt: new Date() };
+    // Process multiple attachments
+    let finalAttachments = [];
+    if (attachments && Array.isArray(attachments)) {
+        finalAttachments = attachments;
+    } else if (attachment && attachment.data) {
+        finalAttachments = [attachment];
+    }
+
+    const parsedAttachments = [];
+    for (const att of finalAttachments) {
+        let extractedText = '';
+        if (att.data) {
+            if (att.mimeType && !att.mimeType.startsWith('image/')) {
+                extractedText = await parseAttachment(att.data, att.mimeType);
+            }
+            parsedAttachments.push({
+                data: att.data,
+                fileName: att.fileName || 'file',
+                mimeType: att.mimeType,
+                fileSize: att.fileSize || 0,
+                extractedText
+            });
+        }
+    }
+
+    const userMsg = { 
+        chat: chatId, 
+        role: 'user', 
+        content: message || '', 
+        attachment: attachment || null, 
+        attachments: parsedAttachments, 
+        createdAt: new Date() 
+    };
 
     try {
         const m = await import('mongoose');
@@ -132,7 +167,7 @@ export const handleChatStream = async (req, res) => {
 
     if (provider === 'offline') {
         try {
-            const fullOutput = await queryOfflineModelStream(message || '', res);
+            const fullOutput = await queryOfflineModelStream(message || '', res, parsedAttachments);
             try {
                 const m = await import('mongoose');
                 if (m.default.connection.readyState === 1) {
@@ -205,13 +240,41 @@ export const handleChatStream = async (req, res) => {
             const role = msg.role === 'assistant' ? 'model' : 'user';
             
             const parts = [];
-            if (msg.content) parts.push({ text: msg.content });
-            if (msg.attachment && msg.attachment.data) {
-                // Ensure we only pass the raw base64 string, stripping the data URI prefix if present
+            let textContent = msg.content || "";
+
+            // Inject document text content if present
+            if (role === 'user' && msg.attachments && msg.attachments.length > 0) {
+                msg.attachments.forEach(att => {
+                    if (att.extractedText) {
+                        textContent = `[Attached Document: ${att.fileName || 'file'}]\n--- START OF FILE CONTENT ---\n${att.extractedText}\n--- END OF FILE CONTENT ---\n\n` + textContent;
+                    }
+                });
+            }
+
+            if (textContent) {
+                parts.push({ text: textContent });
+            }
+
+            // Map image attachments natively (multimodal inlineData)
+            if (msg.attachments && msg.attachments.length > 0) {
+                msg.attachments.forEach(att => {
+                    if (att.mimeType && att.mimeType.startsWith('image/')) {
+                        const base64Data = att.data.includes(',') 
+                            ? att.data.split(',')[1] 
+                            : att.data;
+                        parts.push({
+                            inlineData: {
+                                data: base64Data,
+                                mimeType: att.mimeType
+                            }
+                        });
+                    }
+                });
+            } else if (msg.attachment && msg.attachment.data) {
+                // Legacy support
                 const base64Data = msg.attachment.data.includes(',') 
                     ? msg.attachment.data.split(',')[1] 
                     : msg.attachment.data;
-                
                 parts.push({
                     inlineData: {
                         data: base64Data,
@@ -232,18 +295,31 @@ export const handleChatStream = async (req, res) => {
 
         // Safety check: Gemini API requires at least one user message in contents.
         if (formattedContents.length === 0) {
-            const parts = [{ text: message || "" }];
-            if (attachment && attachment.data) {
-                const base64Data = attachment.data.includes(',') 
-                    ? attachment.data.split(',')[1] 
-                    : attachment.data;
-                parts.push({
-                    inlineData: {
-                        data: base64Data,
-                        mimeType: attachment.mimeType || 'image/jpeg'
-                    }
-                });
-            }
+            const parts = [];
+            let textContent = message || "";
+            
+            parsedAttachments.forEach(att => {
+                if (att.extractedText) {
+                    textContent = `[Attached Document: ${att.fileName || 'file'}]\n--- START OF FILE CONTENT ---\n${att.extractedText}\n--- END OF FILE CONTENT ---\n\n` + textContent;
+                }
+            });
+
+            parts.push({ text: textContent });
+
+            parsedAttachments.forEach(att => {
+                if (att.mimeType && att.mimeType.startsWith('image/')) {
+                    const base64Data = att.data.includes(',') 
+                        ? att.data.split(',')[1] 
+                        : att.data;
+                    parts.push({
+                        inlineData: {
+                            data: base64Data,
+                            mimeType: att.mimeType
+                        }
+                    });
+                }
+            });
+
             formattedContents.push({ role: 'user', parts });
         }
 
@@ -393,7 +469,7 @@ Do NOT say you cannot access the internet or run code—YOU CAN. Use these tools
 
         // Offline ML learning hook
         try {
-            await learnPair(message || '', fullOutput || '');
+            await learnPair(message || '', fullOutput || '', parsedAttachments);
         } catch (err) {
             console.error("Offline learning failed:", err);
         }
