@@ -5,6 +5,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { storeMemory, retrieveRelevantMemories } from '../services/memoryService.js';
 import fs from 'fs';
 import path from 'path';
+import { queryOfflineModelStream, learnPair } from '../services/offlineModelService.js';
 
 let llmClient;
 const initializeGenerativeClient = () => {
@@ -99,7 +100,7 @@ export const handleChatStream = async (req, res) => {
     const { chatId, message, attachment, personality = 'assistant', provider = 'gemini' } = req.body;
     if (!message && !attachment) return res.status(400).json({ message: 'Message or attachment is required' });
 
-    const userMsg = { _id: Date.now().toString(), chat: chatId, role: 'user', content: message || '', attachment, createdAt: new Date() };
+    const userMsg = { chat: chatId, role: 'user', content: message || '', attachment, createdAt: new Date() };
 
     try {
         const m = await import('mongoose');
@@ -112,9 +113,12 @@ export const handleChatStream = async (req, res) => {
                 chat.title = message.substring(0, 30) + '...';
                 await chat.save();
             }
+        } else {
+            throw new Error("Chat not found in database");
         }
     } catch (error) {
-        memoryMessages.push(userMsg);
+        const fallbackMsg = { _id: Date.now().toString(), ...userMsg };
+        memoryMessages.push(fallbackMsg);
         const chat = memoryChats.find(c => c._id === chatId);
         if (chat && memoryMessages.filter(m => m.chat === chatId).length === 1) {
             chat.title = message.substring(0, 30) + '...';
@@ -126,32 +130,9 @@ export const handleChatStream = async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    if (provider === 'ollama') {
+    if (provider === 'offline') {
         try {
-            const ollamaRes = await fetch('http://localhost:11434/api/generate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: 'phi3', prompt: message, stream: true })
-            });
-
-            if (!ollamaRes.ok) throw new Error('Ollama connection failed');
-
-            let fullOutput = '';
-            for await (const chunk of ollamaRes.body) {
-                const textChunk = chunk.toString('utf-8');
-                const lines = textChunk.split('\n');
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-                    try {
-                        const data = JSON.parse(line);
-                        if (data.response) {
-                            fullOutput += data.response;
-                            res.write(`data: ${JSON.stringify({ text: data.response })}\n\n`);
-                        }
-                    } catch (e) { }
-                }
-            }
-
+            const fullOutput = await queryOfflineModelStream(message || '', res);
             try {
                 const m = await import('mongoose');
                 if (m.default.connection.readyState === 1) {
@@ -163,12 +144,9 @@ export const handleChatStream = async (req, res) => {
                 memoryMessages.push({ _id: Date.now().toString(), chat: chatId, role: 'assistant', content: fullOutput, createdAt: new Date() });
                 saveLocalDB();
             }
-
-            res.write('data: [DONE]\n\n');
-            res.end();
             return;
         } catch (error) {
-            res.write(`data: ${JSON.stringify({ error: "Ollama failed: " + error.message })}\n\n`);
+            res.write(`data: ${JSON.stringify({ error: "Offline ML model failed: " + error.message })}\n\n`);
             res.write('data: [DONE]\n\n');
             res.end();
             return;
@@ -198,11 +176,12 @@ export const handleChatStream = async (req, res) => {
                 clearInterval(interval);
 
                 // Save the streamed reply to the database once complete
-                const botReply = { _id: Date.now().toString(), chat: chatId, role: 'assistant', content: streamedText, createdAt: new Date() };
+                const botReply = { chat: chatId, role: 'assistant', content: streamedText, createdAt: new Date() };
                 try {
                     await Message.create(botReply);
                 } catch (e) {
-                    memoryMessages.push(botReply);
+                    const fallbackBotReply = { _id: Date.now().toString(), ...botReply };
+                    memoryMessages.push(fallbackBotReply);
                     saveLocalDB();
                 }
             }
@@ -214,6 +193,9 @@ export const handleChatStream = async (req, res) => {
         let history = [];
         try {
             history = await Message.find({ chat: chatId }).sort({ createdAt: 1 }).lean();
+            if (!history || history.length === 0) {
+                history = memoryMessages.filter(m => m.chat === chatId);
+            }
         } catch (e) {
             history = memoryMessages.filter(m => m.chat === chatId);
         }
@@ -246,6 +228,23 @@ export const handleChatStream = async (req, res) => {
                     formattedContents.push({ role, parts });
                 }
             }
+        }
+
+        // Safety check: Gemini API requires at least one user message in contents.
+        if (formattedContents.length === 0) {
+            const parts = [{ text: message || "" }];
+            if (attachment && attachment.data) {
+                const base64Data = attachment.data.includes(',') 
+                    ? attachment.data.split(',')[1] 
+                    : attachment.data;
+                parts.push({
+                    inlineData: {
+                        data: base64Data,
+                        mimeType: attachment.mimeType || 'image/jpeg'
+                    }
+                });
+            }
+            formattedContents.push({ role: 'user', parts });
         }
 
         const systemInstruction = `You are an advanced AI assistant with persistent memory and file intelligence capabilities.
@@ -392,6 +391,13 @@ Do NOT say you cannot access the internet or run code—YOU CAN. Use these tools
             saveLocalDB();
         }
 
+        // Offline ML learning hook
+        try {
+            await learnPair(message || '', fullOutput || '');
+        } catch (err) {
+            console.error("Offline learning failed:", err);
+        }
+
         res.write('data: [DONE]\n\n');
         res.end();
     } catch (error) {
@@ -509,6 +515,13 @@ Do NOT say you cannot access the internet or run code—YOU CAN. Use these tools
 
         // Store assistant response
         await storeMemory(userId, 'assistant', fullOutput);
+
+        // Offline ML learning hook
+        try {
+            await learnPair(message || '', fullOutput || '');
+        } catch (err) {
+            console.error("Offline learning failed:", err);
+        }
 
         res.write('data: [DONE]\n\n');
         res.end();

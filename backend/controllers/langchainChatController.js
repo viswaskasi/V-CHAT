@@ -1,7 +1,6 @@
 // Project developed by Viswas. Chat stream controller. (LANGCHAIN VERSION)
 import Chat from '../models/Chat.js';
 import Message from '../models/Message.js';
-import OpenAI from 'openai';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { SystemMessage, HumanMessage, AIMessage } from '@langchain/core/messages';
 import { storeMemory, retrieveRelevantMemories } from '../services/memoryService.js';
@@ -9,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { getAgentTools } from '../tools/agentTools.js';
+import { queryOfflineModelStream, learnPair } from '../services/offlineModelService.js';
 
 let llmClient;
 const initializeGenerativeClient = () => {
@@ -198,7 +198,7 @@ export const handleChatStream = async (req, res) => {
     const { chatId, message, attachment, provider = 'gemini' } = req.body;
     if (!message && !attachment) return res.status(400).json({ message: 'Message or attachment is required' });
 
-    const userMsg = { _id: Date.now().toString(), chat: chatId, role: 'user', content: message || '', attachment, createdAt: new Date() };
+    const userMsg = { chat: chatId, role: 'user', content: message || '', attachment, createdAt: new Date() };
 
     try {
         const m = await import('mongoose');
@@ -211,9 +211,12 @@ export const handleChatStream = async (req, res) => {
                 chat.title = message.substring(0, 30) + '...';
                 await chat.save();
             }
+        } else {
+            throw new Error("Chat not found in database");
         }
     } catch (error) {
-        memoryMessages.push(userMsg);
+        const fallbackMsg = { _id: Date.now().toString(), ...userMsg };
+        memoryMessages.push(fallbackMsg);
         const chat = memoryChats.find(c => c._id === chatId);
         if (chat && memoryMessages.filter(m => m.chat === chatId).length === 1) {
             chat.title = message.substring(0, 30) + '...';
@@ -225,60 +228,9 @@ export const handleChatStream = async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
-    if (provider === 'ollama') {
+    if (provider === 'offline') {
         try {
-            const OLLAMA_SYSTEM_INSTRUCTION = `You are a helpful AI assistant.
-
-Follow these response rules strictly:
-
-1. If the user's question is simple or short:
-   * Respond in 1–2 clear sentences only.
-   * Keep it concise and direct.
-
-2. If the question is moderately complex:
-   * Respond in 3–5 sentences.
-   * Give a clear explanation without unnecessary details.
-
-3. If the question is complex or requires deep understanding:
-   * Provide a detailed explanation.
-   * Use structured formatting if needed (points or paragraphs).
-
-4. Do NOT generate unnecessarily long responses.
-5. Do NOT add unrelated information.
-6. Always match the response length to the question complexity.
-
-Keep answers natural, clear, and to the point.`;
-
-            const ollamaRes = await fetch('http://localhost:11434/api/generate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    model: 'phi3', 
-                    prompt: message, 
-                    system: OLLAMA_SYSTEM_INSTRUCTION,
-                    stream: true 
-                })
-            });
-
-            if (!ollamaRes.ok) throw new Error('Ollama connection failed');
-
-            let fullOutput = '';
-            const decoder = new TextDecoder('utf-8');
-            for await (const chunk of ollamaRes.body) {
-                const textChunk = decoder.decode(chunk, { stream: true });
-                const lines = textChunk.split('\n');
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-                    try {
-                        const data = JSON.parse(line);
-                        if (data.response) {
-                            fullOutput += data.response;
-                            res.write(`data: ${JSON.stringify({ text: data.response })}\n\n`);
-                        }
-                    } catch (e) { }
-                }
-            }
-
+            const fullOutput = await queryOfflineModelStream(message || '', res);
             try {
                 const m = await import('mongoose');
                 if (m.default.connection.readyState === 1) {
@@ -290,85 +242,9 @@ Keep answers natural, clear, and to the point.`;
                 memoryMessages.push({ _id: Date.now().toString(), chat: chatId, role: 'assistant', content: fullOutput, createdAt: new Date() });
                 saveLocalDB();
             }
-
-            res.write('data: [DONE]\n\n');
-            res.end();
             return;
         } catch (error) {
-            res.write(`data: ${JSON.stringify({ error: "Ollama failed: " + error.message })}\n\n`);
-            res.write('data: [DONE]\n\n');
-            res.end();
-            return;
-        }
-    }
-
-    if (provider === 'nvidia') {
-        try {
-            const client = new OpenAI({
-                baseURL: "https://integrate.api.nvidia.com/v1",
-                apiKey: process.env.NVIDIA_API_KEY || "YOUR_NVIDIA_API_KEY"
-            });
-
-            const msgs = [{ role: "system", content: SYSTEM_INSTRUCTION }];
-            let history = [];
-            try {
-                history = await Message.find({ chat: chatId }).sort({ createdAt: 1 }).lean();
-            } catch (e) {
-                history = memoryMessages.filter(m => m.chat === chatId);
-            }
-            for (const msg of history) {
-                if (msg.role === 'user' || msg.role === 'assistant') {
-                    msgs.push({ role: msg.role, content: msg.content || "" });
-                }
-            }
-            msgs.push({ role: "user", content: message || "" });
-
-            const stream = await client.chat.completions.create({
-                model: "z-ai/glm-5.1",
-                messages: msgs,
-                temperature: 1,
-                top_p: 1,
-                max_tokens: 16384,
-                extra_body: { chat_template_kwargs: { enable_thinking: true, clear_thinking: false } },
-                stream: true
-            });
-
-            let fullOutput = '';
-            for await (const chunk of stream) {
-                if (!chunk.choices || chunk.choices.length === 0 || !chunk.choices[0].delta) continue;
-                const delta = chunk.choices[0].delta;
-                
-                // Extract reasoning
-                const reasoning = delta.reasoning_content;
-                if (reasoning) {
-                    fullOutput += reasoning;
-                    res.write(`data: ${JSON.stringify({ text: reasoning })}\n\n`);
-                }
-                
-                // Extract content
-                if (delta.content) {
-                    fullOutput += delta.content;
-                    res.write(`data: ${JSON.stringify({ text: delta.content })}\n\n`);
-                }
-            }
-
-            try {
-                const m = await import('mongoose');
-                if (m.default.connection.readyState === 1) {
-                    await Message.create({ chat: chatId, role: 'assistant', content: fullOutput });
-                } else {
-                    throw new Error("No DB");
-                }
-            } catch (e) {
-                memoryMessages.push({ _id: Date.now().toString(), chat: chatId, role: 'assistant', content: fullOutput, createdAt: new Date() });
-                saveLocalDB();
-            }
-
-            res.write('data: [DONE]\n\n');
-            res.end();
-            return;
-        } catch (error) {
-            res.write(`data: ${JSON.stringify({ error: "NVIDIA API failed: " + error.message })}\n\n`);
+            res.write(`data: ${JSON.stringify({ error: "Offline ML model failed: " + error.message })}\n\n`);
             res.write('data: [DONE]\n\n');
             res.end();
             return;
@@ -394,11 +270,12 @@ Keep answers natural, clear, and to the point.`;
                 res.end();
                 clearInterval(interval);
 
-                const botReply = { _id: Date.now().toString(), chat: chatId, role: 'assistant', content: streamedText, createdAt: new Date() };
+                const botReply = { chat: chatId, role: 'assistant', content: streamedText, createdAt: new Date() };
                 try {
                     await Message.create(botReply);
                 } catch (e) {
-                    memoryMessages.push(botReply);
+                    const fallbackBotReply = { _id: Date.now().toString(), ...botReply };
+                    memoryMessages.push(fallbackBotReply);
                     saveLocalDB();
                 }
             }
@@ -410,6 +287,9 @@ Keep answers natural, clear, and to the point.`;
         let history = [];
         try {
             history = await Message.find({ chat: chatId }).sort({ createdAt: 1 }).lean();
+            if (!history || history.length === 0) {
+                history = memoryMessages.filter(m => m.chat === chatId);
+            }
         } catch (e) {
             history = memoryMessages.filter(m => m.chat === chatId);
         }
@@ -436,6 +316,24 @@ Keep answers natural, clear, and to the point.`;
                 }
                 messages.push(new HumanMessage({ content }));
             }
+        }
+
+        // Safety fallback: Google Generative AI requires at least one user/human message in the request.
+        if (messages.length <= 1) {
+            let content = message || "";
+            if (attachment && attachment.data) {
+                const base64Data = attachment.data.includes(',') 
+                    ? attachment.data.split(',')[1] 
+                    : attachment.data;
+                content = [
+                    { type: "text", text: message || "" },
+                    { 
+                        type: "image_url", 
+                        image_url: { url: `data:${attachment.mimeType || 'image/jpeg'};base64,${base64Data}` } 
+                    }
+                ];
+            }
+            messages.push(new HumanMessage({ content }));
         }
 
         const tools = getAgentTools();
@@ -467,6 +365,13 @@ Keep answers natural, clear, and to the point.`;
         } catch (e) {
             memoryMessages.push({ _id: Date.now().toString(), chat: chatId, role: 'assistant', content: fullOutput, createdAt: new Date() });
             saveLocalDB();
+        }
+
+        // Offline ML learning hook
+        try {
+            await learnPair(message || '', fullOutput || '');
+        } catch (err) {
+            console.error("Offline learning failed:", err);
         }
 
         res.write('data: [DONE]\n\n');
@@ -531,6 +436,13 @@ export const handleMemoryChat = async (req, res) => {
         }
 
         await storeMemory(userId, 'assistant', fullOutput);
+
+        // Offline ML learning hook
+        try {
+            await learnPair(message || '', fullOutput || '');
+        } catch (err) {
+            console.error("Offline learning failed:", err);
+        }
 
         res.write('data: [DONE]\n\n');
         res.end();

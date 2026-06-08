@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { Send, Mic, Copy, Play, Code, FileText, Database, Lightbulb, Layout, X, Paperclip } from 'lucide-react';
+import { Send, Mic, Copy, Play, Layout, X, Paperclip } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -54,6 +54,8 @@ export default function ChatView() {
 
                 if ((initialMsg || initialAttachment) && messages.length === 0) {
                     navigate(location.pathname, { replace: true, state: {} });
+                    setInput('');
+                    setAttachment(null);
                     // Provide the passed model directly to handleSend to ensure it uses the right one
                     // even before state has updated
                     handleSend(undefined, initialMsg, initialAttachment, passedModel);
@@ -159,6 +161,8 @@ export default function ChatView() {
 
         if (!id) {
             try {
+                setInput('');
+                setAttachment(null);
                 const reqTitle = textToSend.length > 20 ? textToSend.substring(0, 20) + '...' : (textToSend || 'New Image Chat');
                 const res = await fetch(`http://${window.location.hostname}:5000/api/chats`, {
                     method: 'POST',
@@ -378,8 +382,7 @@ export default function ChatView() {
                     className="bg-black/40 text-white/90 border border-white/10 hover:border-white/20 rounded-xl px-2 py-1.5 text-[11px] md:text-xs outline-none focus:border-blue-500 transition-colors backdrop-blur-md cursor-pointer self-center mr-1"
                 >
                     <option value="gemini">✨ Gemini</option>
-                    <option value="ollama">🦙 Ollama</option>
-                    <option value="nvidia">🟢 NVIDIA GLM</option>
+                    <option value="offline">🔌 Offline Model</option>
                 </select>
 
                 {isTyping ? (
