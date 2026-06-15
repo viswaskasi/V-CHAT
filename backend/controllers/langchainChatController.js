@@ -3,18 +3,19 @@ import Chat from '../models/Chat.js';
 import Message from '../models/Message.js';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { SystemMessage, HumanMessage, AIMessage } from '@langchain/core/messages';
-import { storeMemory, retrieveRelevantMemories } from '../services/memoryService.js';
+import { storeMemory, retrieveRelevantMemories, getMemories, deleteMemoryById } from '../services/memoryService.js';
 import fs from 'fs';
 import path from 'path';
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { getAgentTools } from '../tools/agentTools.js';
 import { queryOfflineModelStream, learnPair } from '../services/offlineModelService.js';
 import { parseAttachment } from '../services/fileParserService.js';
+import { indexDocument, retrieveRelevantChunks } from '../services/ragService.js';
 
 let llmClient;
 const initializeGenerativeClient = () => {
     // Only initialize the client if we have a valid API key configured
-    if (!llmClient && process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_actual_gemini_api_key_here') {
+    if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_actual_gemini_api_key_here') {
         try {
             llmClient = new ChatGoogleGenerativeAI({
                 model: "gemini-2.5-flash",
@@ -24,6 +25,8 @@ const initializeGenerativeClient = () => {
         } catch (e) { 
             console.error("Langchain init error:", e);
         }
+    } else {
+        llmClient = null;
     }
 };
 
@@ -196,7 +199,7 @@ Do NOT say you cannot access the internet or run code—YOU CAN. Use these tools
 **CRITICAL RULE FOR TOOLS**: When you use a tool (Search or Code), you MUST NOT write a huge essay. Your response must be EXTREMELY concise (1-2 sentences) giving just the direct answer, UNLESS the user explicitly asks for a detailed or long explanation. Provide mostly small, direct responses for better performance.`;
 
 export const handleChatStream = async (req, res) => {
-    const { chatId, message, attachment, attachments, provider = 'gemini' } = req.body;
+    const { chatId, message, attachment, attachments, provider = 'gemini', userId = 'default_user' } = req.body;
     if (!message && !attachment && (!attachments || attachments.length === 0)) {
         return res.status(400).json({ message: 'Message or attachment is required' });
     }
@@ -223,6 +226,15 @@ export const handleChatStream = async (req, res) => {
                 fileSize: att.fileSize || 0,
                 extractedText
             });
+
+            // Index attachment chunks in the RAG system
+            if (extractedText) {
+                try {
+                    await indexDocument(chatId, att.fileName || 'file', extractedText);
+                } catch (ragErr) {
+                    console.error("Failed to index attachment for RAG:", ragErr);
+                }
+            }
         }
     }
 
@@ -262,6 +274,7 @@ export const handleChatStream = async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
 
     if (provider === 'offline') {
         try {
@@ -280,6 +293,226 @@ export const handleChatStream = async (req, res) => {
             return;
         } catch (error) {
             res.write(`data: ${JSON.stringify({ error: "Offline ML model failed: " + error.message })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+        }
+    }
+
+    if (provider === 'gemma-local') {
+        try {
+            // Build memory context
+            let memoryContextText = "";
+            try {
+                const memories = await retrieveRelevantMemories(userId, message, 5);
+                if (memories && memories.length > 0) {
+                    memoryContextText = "\n\n### 🧠 RELEVANT PAST MEMORIES (Recall naturally):\n" + 
+                        memories.map(m => `- ${m.content}`).join('\n');
+                }
+            } catch (memError) {
+                console.error("Failed to retrieve memories for Ollama stream:", memError);
+            }
+
+            // Build document context (RAG)
+            let documentContextText = "";
+            try {
+                const chunks = await retrieveRelevantChunks(chatId, message || "");
+                if (chunks && chunks.length > 0) {
+                    documentContextText = "\n\n### 📂 RELEVANT EXCERPTS FROM UPLOADED DOCUMENTS:\n" +
+                        chunks.map(c => `[File: ${c.fileName}]\n... ${c.content} ...`).join('\n\n');
+                }
+            } catch (ragError) {
+                console.error("Failed to retrieve document chunks for Ollama stream:", ragError);
+            }
+
+            // Compile all history
+            let history = [];
+            try {
+                history = await Message.find({ chat: chatId }).sort({ createdAt: 1 }).lean();
+                if (!history || history.length === 0) {
+                    history = memoryMessages.filter(m => m.chat === chatId);
+                }
+            } catch (e) {
+                history = memoryMessages.filter(m => m.chat === chatId);
+            }
+
+            // Map messages for Ollama API, starting with the static system prompt to enable prompt cache
+            const formattedMessages = [
+                {
+                    role: 'system',
+                    content: `You are Claude (Gemma Local), a highly intelligent, thoughtful, and warm AI assistant.
+Your goal is to provide clear, relevant, and beautifully written answers.
+- Use natural, polite, and professional language.
+- Adapt your response length dynamically based on the complexity of the question:
+  * For simple/short questions -> Respond with a direct, concise 1-2 sentence answer. Avoid unnecessary details.
+  * For complex/deep questions -> Provide a detailed, thorough explanation with smooth paragraph flow. Use headings, bullet points, and code blocks only where naturally appropriate. Do NOT force a rigid layout.`
+                }
+            ];
+
+            for (const msg of history) {
+                const role = msg.role === 'assistant' ? 'assistant' : 'user';
+                let textContent = msg.content || "";
+
+                if (role === 'user' && msg.attachments && msg.attachments.length > 0) {
+                    msg.attachments.forEach(att => {
+                        if (att.extractedText) {
+                            textContent = `[Attached Document: ${att.fileName || 'file'}]\n--- START OF FILE CONTENT ---\n${att.extractedText}\n--- END OF FILE CONTENT ---\n\n` + textContent;
+                        }
+                    });
+                }
+
+                const ollamaMsg = { role, content: textContent };
+
+                // Handle multimodal image input
+                const images = [];
+                if (msg.attachments && msg.attachments.length > 0) {
+                    msg.attachments.forEach(att => {
+                        if (att.mimeType && att.mimeType.startsWith('image/')) {
+                            const base64Data = att.data.includes(',') 
+                                ? att.data.split(',')[1] 
+                                : att.data;
+                            images.push(base64Data);
+                        }
+                    });
+                } else if (msg.attachment && msg.attachment.data) {
+                    const base64Data = msg.attachment.data.includes(',') 
+                        ? msg.attachment.data.split(',')[1] 
+                        : msg.attachment.data;
+                    images.push(base64Data);
+                }
+
+                if (images.length > 0) {
+                    ollamaMsg.images = images;
+                }
+
+                formattedMessages.push(ollamaMsg);
+            }
+
+            // Safety fallback: Ollama requires at least one user message after system
+            if (formattedMessages.length === 1) {
+                let textContent = message || "";
+                parsedAttachments.forEach(att => {
+                    if (att.extractedText) {
+                        textContent = `[Attached Document: ${att.fileName || 'file'}]\n--- START OF FILE CONTENT ---\n${att.extractedText}\n--- END OF FILE CONTENT ---\n\n` + textContent;
+                    }
+                });
+
+                const ollamaMsg = { role: 'user', content: textContent };
+                const images = [];
+                parsedAttachments.forEach(att => {
+                    if (att.mimeType && att.mimeType.startsWith('image/')) {
+                        const base64Data = att.data.includes(',') 
+                            ? att.data.split(',')[1] 
+                            : att.data;
+                        images.push(base64Data);
+                    }
+                });
+                if (images.length > 0) {
+                    ollamaMsg.images = images;
+                }
+                formattedMessages.push(ollamaMsg);
+            }
+
+            // Inject query-specific memory and document contexts into the last user message
+            // Doing it here keeps the prompt cache valid for all preceding messages
+            const lastUserMsg = formattedMessages.reduceRight((acc, msg) => acc || (msg.role === 'user' ? msg : null), null);
+            if (lastUserMsg) {
+                let contextSuffix = "";
+                if (memoryContextText) {
+                    contextSuffix += `\n\n### 🧠 RELEVANT PAST MEMORIES (Recall naturally):\n${memoryContextText}`;
+                }
+                if (documentContextText) {
+                    contextSuffix += `\n\n### 📂 RELEVANT EXCERPTS FROM UPLOADED DOCUMENTS:\n${documentContextText}`;
+                }
+                if (contextSuffix) {
+                    lastUserMsg.content = lastUserMsg.content + contextSuffix;
+                }
+            }
+
+            const ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
+            const ollamaModelName = process.env.LOCAL_GEMMA_MODEL_NAME || 'gemma4';
+
+            const response = await fetch(`${ollamaUrl}/api/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: ollamaModelName,
+                    messages: formattedMessages,
+                    stream: true,
+                    keep_alive: -1,
+                    options: {
+                        num_ctx: 2048,
+                        num_predict: 512,
+                        num_keep: 150,
+                        temperature: 0.3,
+                        top_p: 0.9,
+                        top_k: 40,
+                        repeat_penalty: 1.1
+                    }
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Ollama local server error: ${response.statusText}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let fullOutput = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                const chunk = decoder.decode(value);
+                // Ollama streams JSON objects separated by newlines
+                const lines = chunk.split('\n').filter(l => l.trim() !== "");
+                for (const line of lines) {
+                    try {
+                        const data = JSON.parse(line);
+                        if (data.message && data.message.content) {
+                            const text = data.message.content;
+                            fullOutput += text;
+                            res.write(`data: ${JSON.stringify({ text })}\n\n`);
+                        }
+                    } catch (jsonErr) {
+                        // Handle partial JSON or extra newlines
+                    }
+                }
+            }
+
+            // Save assistant reply
+            try {
+                const m = await import('mongoose');
+                if (m.default.connection.readyState === 1) {
+                    await Message.create({ chat: chatId, role: 'assistant', content: fullOutput });
+                } else {
+                    throw new Error("No DB");
+                }
+            } catch (e) {
+                memoryMessages.push({ _id: Date.now().toString(), chat: chatId, role: 'assistant', content: fullOutput, createdAt: new Date() });
+                saveLocalDB();
+            }
+
+            // Auto-store conversation pair into persistent semantic memory
+            if (message && message.trim().length > 3) {
+                storeMemory(userId, 'user', message).catch(err => console.error("Error storing user memory:", err));
+                storeMemory(userId, 'assistant', fullOutput).catch(err => console.error("Error storing assistant memory:", err));
+            }
+
+            // Offline ML learning hook
+            try {
+                await learnPair(message || '', fullOutput || '', parsedAttachments);
+            } catch (err) {
+                console.error("Offline learning failed:", err);
+            }
+
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+        } catch (error) {
+            console.error("Ollama Local Streaming Error:", error);
+            res.write(`data: ${JSON.stringify({ error: "Local Gemma 4 model failed: " + error.message })}\n\n`);
             res.write('data: [DONE]\n\n');
             res.end();
             return;
@@ -329,7 +562,31 @@ export const handleChatStream = async (req, res) => {
             history = memoryMessages.filter(m => m.chat === chatId);
         }
 
-        const messages = [new SystemMessage(SYSTEM_INSTRUCTION)];
+        // Retrieve relevant past memories and inject into system context
+        let memoryContextText = "";
+        try {
+            const memories = await retrieveRelevantMemories(userId, message, 5);
+            if (memories && memories.length > 0) {
+                memoryContextText = "\n\n### 🧠 RELEVANT PAST MEMORIES (Recall naturally):\n" + 
+                    memories.map(m => `- ${m.content}`).join('\n');
+            }
+        } catch (memError) {
+            console.error("Failed to retrieve memories for stream:", memError);
+        }
+
+        // Retrieve relevant document chunks from RAG index
+        let documentContextText = "";
+        try {
+            const chunks = await retrieveRelevantChunks(chatId, message || "");
+            if (chunks && chunks.length > 0) {
+                documentContextText = "\n\n### 📂 RELEVANT EXCERPTS FROM UPLOADED DOCUMENTS (Use these to answer user queries):\n" +
+                    chunks.map(c => `[File: ${c.fileName}]\n... ${c.content} ...`).join('\n\n');
+            }
+        } catch (ragError) {
+            console.error("Failed to retrieve document chunks for stream:", ragError);
+        }
+
+        const messages = [new SystemMessage(SYSTEM_INSTRUCTION + memoryContextText + documentContextText)];
         
         for (const msg of history) {
             if (msg.role === 'assistant') {
@@ -337,15 +594,6 @@ export const handleChatStream = async (req, res) => {
             } else {
                 const contentParts = [];
                 let textContent = msg.content || "";
-
-                // Inject extracted text from documents
-                if (msg.attachments && msg.attachments.length > 0) {
-                    msg.attachments.forEach(att => {
-                        if (att.extractedText) {
-                            textContent = `[Attached Document: ${att.fileName || 'file'}]\n--- START OF FILE CONTENT ---\n${att.extractedText}\n--- END OF FILE CONTENT ---\n\n` + textContent;
-                        }
-                    });
-                }
 
                 contentParts.push({ type: "text", text: textContent });
 
@@ -383,9 +631,6 @@ export const handleChatStream = async (req, res) => {
             const contentParts = [{ type: "text", text: message || "" }];
             
             parsedAttachments.forEach(att => {
-                if (att.extractedText) {
-                    contentParts[0].text = `[Attached Document: ${att.fileName || 'file'}]\n--- START OF FILE CONTENT ---\n${att.extractedText}\n--- END OF FILE CONTENT ---\n\n` + contentParts[0].text;
-                }
                 if (att.mimeType && att.mimeType.startsWith('image/')) {
                     const base64Data = att.data.includes(',') 
                         ? att.data.split(',')[1] 
@@ -432,6 +677,12 @@ export const handleChatStream = async (req, res) => {
             saveLocalDB();
         }
 
+        // Auto-store conversation pair into persistent semantic memory
+        if (message && message.trim().length > 3) {
+            storeMemory(userId, 'user', message).catch(err => console.error("Error storing user memory:", err));
+            storeMemory(userId, 'assistant', fullOutput).catch(err => console.error("Error storing assistant memory:", err));
+        }
+
         // Offline ML learning hook
         try {
             await learnPair(message || '', fullOutput || '', parsedAttachments);
@@ -449,12 +700,102 @@ export const handleChatStream = async (req, res) => {
 };
 
 export const handleMemoryChat = async (req, res) => {
-    const { userId, message } = req.body;
+    const { userId, message, provider = 'gemini' } = req.body;
     if (!message) return res.status(400).json({ message: 'Message is required' });
     if (!userId) return res.status(400).json({ message: 'userId is required' });
 
     try {
         await storeMemory(userId, 'user', message);
+
+        if (provider === 'gemma-local') {
+            const relevantMemories = await retrieveRelevantMemories(userId, message, 5);
+            let contextText = "Relevant Past Memories:\n";
+            relevantMemories.forEach(mem => {
+                contextText += `[${mem.role}]: ${mem.content}\n`;
+            });
+
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            res.setHeader('X-Accel-Buffering', 'no');
+
+            const ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
+            const ollamaModelName = process.env.LOCAL_GEMMA_MODEL_NAME || 'gemma4';
+
+            const messages = [
+                {
+                    role: 'system',
+                    content: `You are Claude (Gemma Local), a highly intelligent, thoughtful, and warm AI assistant.
+Your goal is to provide clear, relevant, and beautifully written answers.
+- Use natural, polite, and professional language.
+- Adapt your response length dynamically based on the complexity of the question:
+  * For simple/short questions -> Respond with a direct, concise 1-2 sentence answer. Avoid unnecessary details.
+  * For complex/deep questions -> Provide a detailed, thorough explanation with smooth paragraph flow. Use headings, bullet points, and code blocks only where naturally appropriate. Do NOT force a rigid layout.`
+                },
+                {
+                    role: 'user',
+                    content: message + (relevantMemories && relevantMemories.length > 0 ? `\n\n### 🧠 RELEVANT PAST MEMORIES (Recall naturally):\n${relevantMemories.map(m => `- ${m.content}`).join('\n')}` : "")
+                }
+            ];
+
+            const response = await fetch(`${ollamaUrl}/api/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: ollamaModelName,
+                    messages: messages,
+                    stream: true,
+                    keep_alive: -1,
+                    options: {
+                        num_ctx: 2048,
+                        num_predict: 512,
+                        num_keep: 150,
+                        temperature: 0.3,
+                        top_p: 0.9,
+                        top_k: 40,
+                        repeat_penalty: 1.1
+                    }
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Ollama local server error: ${response.statusText}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let fullOutput = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                const chunk = decoder.decode(value);
+                const lines = chunk.split('\n').filter(l => l.trim() !== "");
+                for (const line of lines) {
+                    try {
+                        const data = JSON.parse(line);
+                        if (data.message && data.message.content) {
+                            const text = data.message.content;
+                            fullOutput += text;
+                            res.write(`data: ${JSON.stringify({ text })}\n\n`);
+                        }
+                    } catch (e) {}
+                }
+            }
+
+            await storeMemory(userId, 'assistant', fullOutput);
+
+            try {
+                await learnPair(message || '', fullOutput || '');
+            } catch (err) {
+                console.error("Offline learning failed:", err);
+            }
+
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+        }
 
         initializeGenerativeClient();
         if (!llmClient) {
@@ -523,8 +864,38 @@ export const handleMemoryChat = async (req, res) => {
 
 export const getUserMemory = async (req, res) => {
     try {
-        const messages = await Message.find({ userId: req.params.userId }).sort({ createdAt: -1 }).limit(50);
-        res.json(messages);
+        const memories = await getMemories(req.params.userId);
+        res.json(memories);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+export const deleteMemory = async (req, res) => {
+    try {
+        const success = await deleteMemoryById(req.params.id);
+        if (success) {
+            res.json({ message: 'Memory removed successfully' });
+        } else {
+            res.status(400).json({ error: 'Failed to delete memory' });
+        }
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+};
+
+export const createManualMemory = async (req, res) => {
+    const { userId, message } = req.body;
+    if (!userId || !message) {
+        return res.status(400).json({ error: 'userId and message content are required' });
+    }
+    try {
+        const memory = await storeMemory(userId, 'user', message);
+        if (memory) {
+            res.status(201).json(memory);
+        } else {
+            res.status(400).json({ error: 'Failed to create memory' });
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }

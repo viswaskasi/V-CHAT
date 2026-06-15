@@ -340,48 +340,38 @@ const loadEnvKnowledge = () => {
     const knowledge = [];
 
     let geminiKey = process.env.GEMINI_API_KEY || '';
-    let port = process.env.PORT || '5000';
-    let dbUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/ai-chatbot';
-    let jwtSecret = process.env.JWT_SECRET || '';
+    let localGemmaModel = process.env.LOCAL_GEMMA_MODEL_NAME || 'gemma4';
+    let ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434';
 
     // If environment variables are not in process.env yet, parse .env file directly
     if (fs.existsSync(envPath)) {
         try {
             const envConfig = dotenv.parse(fs.readFileSync(envPath));
             if (envConfig.GEMINI_API_KEY) geminiKey = envConfig.GEMINI_API_KEY;
-            if (envConfig.PORT) port = envConfig.PORT;
-            if (envConfig.MONGODB_URI) dbUri = envConfig.MONGODB_URI;
-            if (envConfig.JWT_SECRET) jwtSecret = envConfig.JWT_SECRET;
+            if (envConfig.LOCAL_GEMMA_MODEL_NAME) localGemmaModel = envConfig.LOCAL_GEMMA_MODEL_NAME;
+            if (envConfig.OLLAMA_URL) ollamaUrl = envConfig.OLLAMA_URL;
         } catch (e) {
             console.error("Error reading .env for offline model training:", e);
         }
     }
 
-    const maskedKey = geminiKey ? `${geminiKey.substring(0, 8)}...${geminiKey.substring(geminiKey.length - 4)}` : 'Not configured';
-
-    // Index API key and environmental info
+    // Index API key and Gemma Local info
     knowledge.push({
         text: "what is my gemini api key show gemini key api key credentials env",
-        answer: `Your Gemini API Key configured in your \`.env\` file is: \`${geminiKey || 'Not Configured'}\` (Masked: \`${maskedKey}\`).\n\nIt is loaded into the system as \`process.env.GEMINI_API_KEY\`.`,
+        answer: geminiKey ? `Your Gemini API Key is: \`${geminiKey}\`` : "Your Gemini API Key is not configured.",
         type: "api_key"
     });
 
     knowledge.push({
-        text: "what port is the server running on backend port api port webserver port",
-        answer: `The backend server is configured to run on port: \`${port}\`.`,
-        type: "config"
+        text: "what is my local gemma model name local gemma model local gemma gemma model name",
+        answer: localGemmaModel ? `Your local Gemma model name is: \`${localGemmaModel}\`` : "Your local Gemma model name is not configured.",
+        type: "gemma_local"
     });
 
     knowledge.push({
-        text: "what is my mongodb uri database connection connection string database url",
-        answer: `The MongoDB connection URI configured in your environment is: \`${dbUri}\`.`,
-        type: "config"
-    });
-
-    knowledge.push({
-        text: "what is the jwt secret token secret credentials key",
-        answer: `The JWT secret key used to sign tokens is: \`${jwtSecret}\`.`,
-        type: "config"
+        text: "what is my gemma local url ollama url local gemma url",
+        answer: ollamaUrl ? `Your local Gemma/Ollama URL is: \`${ollamaUrl}\`` : "Your local Gemma/Ollama URL is not configured.",
+        type: "gemma_local"
     });
 
     return { knowledge, geminiKey };
@@ -430,12 +420,16 @@ export const queryOfflineModelStream = async (queryText, res, queryAttachments =
 
     let answer = "";
     if (match) {
-        const sourceLabel = match.document.type === "api_key" ? "Environment Keys" : 
-                            match.document.type === "config" ? "Server Configuration" : 
-                            match.document.type === "document_content" ? "Uploaded Document Content" : `Persistent Brain Memory (${match.matchedField})`;
-        answer = `🤖 **[Offline ML Model - Match found in ${sourceLabel}]** (Confidence: ${Math.round(match.score * 100)}%)\n\n${match.document.answer}`;
+        answer = match.document.answer;
     } else {
-        answer = `🔌 **[Offline ML Model - Fully Local Fallback]**\n\nI am currently operating in **Offline Mode** (meaning I cannot query external generative models).\n\nI couldn't find a sufficiently close match for your question: *"${queryText}"* in my local training data.\n\n### What can I answer here?\n- Ask me about the environment settings (e.g. "What is my API key?", "What is the MongoDB URI?", "What port is the server running on?")\n- Ask me about the contents of files you uploaded (e.g. "What is in my document?")\n- Ask me questions that you previously asked while Gemini was online, and I will retrieve the exact answers from our chat history!`;
+        answer = `I am currently operating in **Offline Mode** and couldn't find a close match for *"${queryText}"* in my local training database.
+
+Here's what I can do for you right now:
+* Look up your **Gemini API key** or local Gemma configurations.
+* Search and extract text from any files you've uploaded.
+* Retrieve answers to questions we discussed previously while I was online.
+
+Let me know how you'd like to proceed!`;
     }
 
     // Stream the response out in small chunks of words to make it extremely fast and smooth

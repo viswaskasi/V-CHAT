@@ -51,11 +51,29 @@ body {
   50% { opacity: 0; }
 }
 
-.typing-active .prose > *:last-child::after {
-  content: "│";
+.typing-active-gemini.prose > *:last-child::after {
+  content: "✦";
   animation: typing-blink 0.7s infinite;
   margin-left: 2px;
-  color: #f3f4f6;
+  color: #a78bfa;
+  font-weight: 500;
+  display: inline-block;
+}
+
+.typing-active-claude.prose > *:last-child::after {
+  content: "▕";
+  animation: typing-blink 0.7s infinite;
+  margin-left: 2px;
+  color: #f59e0b;
   font-weight: 300;
+  display: inline-block;
+}
+
+.typing-active-chatgpt.prose > *:last-child::after {
+  content: "█";
+  animation: typing-blink 0.7s infinite;
+  margin-left: 2px;
+  color: #10b981;
+  font-weight: 500;
   display: inline-block;
 }

@@ -168,6 +168,38 @@
       "content": "hello",
       "attachment": null,
       "createdAt": "2026-06-08T14:54:32.766Z"
+    },
+    {
+      "_id": "1781533896617",
+      "chat": "test_chat_id",
+      "role": "user",
+      "content": "Tell me about javascript",
+      "attachment": null,
+      "attachments": [],
+      "createdAt": "2026-06-15T14:31:36.614Z"
+    },
+    {
+      "_id": "1781533905715",
+      "chat": "test_chat_id",
+      "role": "assistant",
+      "content": "### 🎯 ANSWER\nJavaScript is a popular programming language used for web development. It allows developers to create interactive and dynamic websites.\n\n### 📌 DETAILS\n* JavaScript is a scripting language that runs in the user's web browser.\n* It is primarily used to add interactivity to web pages, such as animations, form validation, and real-time updates.\n\n\n",
+      "createdAt": "2026-06-15T14:31:45.715Z"
+    },
+    {
+      "_id": "1781533911022",
+      "chat": "test_chat_id",
+      "role": "user",
+      "content": "Tell me about javascript",
+      "attachment": null,
+      "attachments": [],
+      "createdAt": "2026-06-15T14:31:51.022Z"
+    },
+    {
+      "_id": "1781533923631",
+      "chat": "test_chat_id",
+      "role": "assistant",
+      "content": "### 🎯 ANSWER\nJavaScript is a popular programming language used for web development. It allows developers to create interactive and dynamic websites.\n\n### 📌 DETAILS\n* JavaScript is a scripting language that runs in the user's web browser.\n* It is primarily used to add interactivity to web pages, such as animations, form validation, and real-time updates. \n\n\n",
+      "createdAt": "2026-06-15T14:32:03.631Z"
     }
   ]
 }

@@ -1,0 +1,7 @@
+FROM C:\Users\viswa\Downloads\gemma-2-2b-it-Q4_K_M.gguf
+PARAMETER num_ctx 2048
+PARAMETER num_predict 800
+PARAMETER temperature 0.6
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER repeat_penalty 1.1

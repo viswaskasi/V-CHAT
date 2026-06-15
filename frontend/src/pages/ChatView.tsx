@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { Send, Mic, Copy, Play, Layout, X, Paperclip, FileText, FileSpreadsheet, Music, Volume2 } from 'lucide-react';
+import { Send, Mic, Copy, Play, Layout, X, Paperclip, FileText, FileSpreadsheet, Music, Volume2, Code, Terminal, Monitor, Tablet, Smartphone, Download, Eye, Trash2, Image, File, UploadCloud, Brain, ChevronDown, CheckCircle2, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -21,6 +21,7 @@ interface Message {
     content: string;
     attachment?: { data: string, mimeType: string };
     attachments?: Attachment[];
+    provider?: string;
 }
 
 const VLogo = ({ className = "w-6 h-6" }: { className?: string }) => (
@@ -30,6 +31,307 @@ const VLogo = ({ className = "w-6 h-6" }: { className?: string }) => (
         <path d="M12 21V16" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" opacity="0.5" />
     </svg>
 );
+
+// Code Editor with scroll-synced line numbers
+const LineNumberTextarea = ({ value, onChange }: { value: string; onChange: (val: string) => void }) => {
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const gutterRef = useRef<HTMLDivElement>(null);
+
+    const handleScroll = () => {
+        if (textareaRef.current && gutterRef.current) {
+            gutterRef.current.scrollTop = textareaRef.current.scrollTop;
+        }
+    };
+
+    const lineCount = value.split('\n').length;
+    const lineNumbers = Array.from({ length: Math.max(lineCount, 1) }, (_, i) => i + 1);
+
+    return (
+        <div className="flex-1 flex overflow-hidden bg-[#0A0A0A] border border-white/10 rounded-2xl relative font-mono text-[13px] leading-[1.6]">
+            {/* Gutter */}
+            <div 
+                ref={gutterRef}
+                className="w-12 py-4 select-none text-right pr-3 text-white/30 bg-black/40 border-r border-white/5 overflow-hidden font-mono text-[13px] leading-[1.6] font-variant-numeric-tabular-nums"
+            >
+                {lineNumbers.map(n => (
+                    <div key={n} className="h-[20.8px]">{n}</div>
+                ))}
+            </div>
+            {/* Editor */}
+            <textarea
+                ref={textareaRef}
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+                onScroll={handleScroll}
+                className="flex-grow p-4 bg-transparent text-white outline-none resize-none overflow-y-auto font-mono text-[13px] leading-[1.6] h-full"
+                spellCheck={false}
+            />
+        </div>
+    );
+};
+
+interface ParsedContent {
+    text: string;
+    codeBlocks: Array<{ language: string; code: string; isComplete: boolean }>;
+}
+
+const parseMessageContent = (content: string): ParsedContent => {
+    const codeBlocks: Array<{ language: string; code: string; isComplete: boolean }> = [];
+    let text = '';
+    
+    const parts = content.split('```');
+    
+    for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 0) {
+            text += parts[i];
+        } else {
+            const blockContent = parts[i];
+            const lines = blockContent.split('\n');
+            const language = lines[0].trim();
+            const code = lines.slice(1).join('\n');
+            const isComplete = i < parts.length - 1;
+            
+            codeBlocks.push({
+                language,
+                code,
+                isComplete
+            });
+        }
+    }
+    
+    return {
+        text: text.trim(),
+        codeBlocks
+    };
+};
+
+interface ThinkingProcessProps {
+    msgId: string;
+    model: string;
+    isGenerating: boolean;
+    contentLength: number;
+    expandedThoughts: Record<string, boolean>;
+    toggleThought: (id: string) => void;
+    codeBlocks: Array<{ language: string; code: string; isComplete: boolean }>;
+    setActiveArtifact: (artifact: { code: string; id: string } | null) => void;
+}
+
+const ThinkingProcess = ({
+    msgId,
+    model,
+    isGenerating,
+    contentLength,
+    expandedThoughts,
+    toggleThought,
+    codeBlocks,
+    setActiveArtifact
+}: ThinkingProcessProps) => {
+    const isExpanded = expandedThoughts[msgId] !== undefined ? expandedThoughts[msgId] : isGenerating;
+
+    // Define steps based on model
+    let steps: Array<{ title: string; desc: string }> = [];
+    if (model === 'gemini') {
+        steps = [
+            { title: "Analyzing Inputs", desc: "Reading prompt context and attachment tokens..." },
+            { title: "Multimodal Mapping", desc: "Mapping image/document vectors into Gemini context window..." },
+            { title: "Cross-Attention Reasoning", desc: "Structuring response weights via multi-head attention..." },
+            { title: "Content Stream", desc: "Streaming finalized response content..." }
+        ];
+    } else if (model === 'gemma-local') {
+        steps = [
+            { title: "Initializing Context", desc: "Loading localized token sequences into GPU/CPU RAM..." },
+            { title: "Local Matrix Processing", desc: "Evaluating weights using Gemma 4 neural layers..." },
+            { title: "Sampling & Filtering", desc: "Applying top-p/temperature scaling & refining tokens..." },
+            { title: "Token Generation", desc: "Streaming response chunks to frontend view..." }
+        ];
+    } else { // offline
+        steps = [
+            { title: "Cache Scan", desc: "Searching local database index for matching embeddings..." },
+            { title: "RAG Vector Search", desc: "Ranking nearest database vectors and pulling RAG text..." },
+            { title: "Synthesizing Answers", desc: "Formulating answer structures from offline repository..." },
+            { title: "Static Output", desc: "Streaming static local database content..." }
+        ];
+    }
+
+    // Determine current active step based on generation state and length
+    let activeStepIdx = 3; // default to completed
+    if (isGenerating) {
+        if (contentLength === 0) activeStepIdx = 0;
+        else if (contentLength < 100) activeStepIdx = 1;
+        else if (contentLength < 400) activeStepIdx = 2;
+        else activeStepIdx = 3;
+    }
+
+    // Color theme classes based on model
+    const theme = {
+        gemini: {
+            text: 'text-blue-400',
+            bg: 'bg-blue-500/5 hover:bg-blue-500/10',
+            border: 'border-blue-500/10',
+            glow: 'shadow-[0_0_15px_rgba(59,130,246,0.05)]',
+            iconColor: 'text-blue-400',
+            accentBg: 'bg-blue-500/10'
+        },
+        'gemma-local': {
+            text: 'text-amber-500',
+            bg: 'bg-amber-500/5 hover:bg-amber-500/10',
+            border: 'border-amber-500/10',
+            glow: 'shadow-[0_0_15px_rgba(245,158,11,0.05)]',
+            iconColor: 'text-amber-500',
+            accentBg: 'bg-amber-500/10'
+        },
+        offline: {
+            text: 'text-emerald-500',
+            bg: 'bg-emerald-500/5 hover:bg-emerald-500/10',
+            border: 'border-emerald-500/10',
+            glow: 'shadow-[0_0_15px_rgba(16,185,129,0.05)]',
+            iconColor: 'text-emerald-500',
+            accentBg: 'bg-emerald-500/10'
+        }
+    }[model] || {
+        text: 'text-gray-400',
+        bg: 'bg-white/5 hover:bg-white/10',
+        border: 'border-white/10',
+        glow: '',
+        iconColor: 'text-gray-400',
+        accentBg: 'bg-white/10'
+    };
+
+    return (
+        <div className={`mb-3.5 w-full rounded-[16px] border ${theme.border} bg-[#0c0c0e]/40 ${theme.glow} overflow-hidden backdrop-blur-md transition-all duration-300`}>
+            {/* Header */}
+            <button
+                type="button"
+                onClick={() => toggleThought(msgId)}
+                className="w-full flex items-center justify-between px-4 py-2 hover:bg-white/5 transition-all text-left group cursor-pointer"
+            >
+                <div className="flex items-center gap-2">
+                    <Brain size={14} className={`${theme.text} ${isGenerating ? 'animate-pulse' : ''}`} />
+                    <span className="text-[11px] font-bold tracking-wider uppercase text-white/90">
+                        {isGenerating ? 'Thinking Process' : 'Thought Process'}
+                    </span>
+                    {isGenerating && (
+                        <span className="flex h-1.5 w-1.5 relative">
+                            <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${model === 'gemini' ? 'bg-blue-400' : model === 'gemma-local' ? 'bg-amber-400' : 'bg-emerald-400'}`}></span>
+                            <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${model === 'gemini' ? 'bg-blue-500' : model === 'gemma-local' ? 'bg-amber-500' : 'bg-emerald-500'}`}></span>
+                        </span>
+                    )}
+                </div>
+                <div className="flex items-center gap-2">
+                    <span className={`text-[9px] uppercase tracking-widest font-bold font-mono px-2 py-0.5 rounded-md border bg-white/5 ${theme.text} ${theme.border}`}>
+                        {model === 'gemini' ? 'Gemini AI' : model === 'gemma-local' ? 'Gemma 4' : 'Offline'}
+                    </span>
+                    <ChevronDown 
+                        size={12} 
+                        className={`text-gray-400 group-hover:text-white transition-transform duration-250 ${isExpanded ? 'rotate-180' : ''}`} 
+                    />
+                </div>
+            </button>
+
+            {/* Steps list & Code blocks */}
+            <AnimatePresence initial={false}>
+                {isExpanded && (
+                    <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.2, ease: "easeInOut" }}
+                        className="border-t border-white/5 px-4 py-2.5 min-h-0 flex flex-col gap-3 bg-black/10"
+                    >
+                        {/* Process Steps */}
+                        <div className="flex flex-col gap-2">
+                            {steps.map((step, idx) => {
+                                const isCompleted = !isGenerating || idx < activeStepIdx;
+                                const isActive = isGenerating && idx === activeStepIdx;
+                                const isPending = isGenerating && idx > activeStepIdx;
+
+                                return (
+                                    <div 
+                                        key={idx} 
+                                        className={`flex gap-3 items-center transition-all duration-300 ${isPending ? 'opacity-35' : 'opacity-100'}`}
+                                    >
+                                        {/* Icon Column */}
+                                        <div className="flex items-center justify-center h-4 shrink-0">
+                                            {isCompleted ? (
+                                                <CheckCircle2 size={13} className={theme.iconColor} />
+                                            ) : isActive ? (
+                                                <Loader2 size={13} className={`${theme.iconColor} animate-spin`} />
+                                            ) : (
+                                                <div className="w-3.5 h-3.5 rounded-full border border-white/20 shrink-0" />
+                                            )}
+                                        </div>
+
+                                        {/* Details Column */}
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className={`text-[11px] font-bold tracking-wide transition-all shrink-0 ${isActive ? theme.text : isCompleted ? 'text-white/80' : 'text-gray-500'}`}>
+                                                {step.title}
+                                            </span>
+                                            <span className="text-[10px] text-gray-500 hidden sm:inline select-none">•</span>
+                                            <span className="text-[10px] text-gray-400 truncate">
+                                                {step.desc}
+                                            </span>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {/* Extracted Code Blocks */}
+                        {codeBlocks.length > 0 && (
+                            <div className="mt-2 border-t border-white/5 pt-3.5 flex flex-col gap-2.5">
+                                <div className="flex items-center gap-2 px-1">
+                                    <Code size={13} className={theme.text} />
+                                    <span className="text-[10px] font-bold tracking-wider uppercase text-white/80">
+                                        Generated Code ({codeBlocks.length})
+                                    </span>
+                                </div>
+                                
+                                {codeBlocks.map((block, bIdx) => {
+                                    const isHtml = block.language === 'html';
+                                    const showPreviewButton = isHtml && !isGenerating;
+                                    
+                                    return (
+                                        <div key={bIdx} className="relative group/code overflow-hidden rounded-xl border border-white/10 shadow-lg bg-[#050505]">
+                                            {showPreviewButton && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setActiveArtifact({ code: block.code, id: Date.now().toString() })}
+                                                    className="absolute top-2.5 right-2.5 z-20 opacity-0 group-hover/code:opacity-100 transition-opacity bg-blue-600/90 hover:bg-blue-500 text-white text-[11px] px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 shadow-lg font-medium backdrop-blur-md border border-blue-400/30 cursor-pointer"
+                                                >
+                                                    <Layout size={13} />
+                                                    Preview UI
+                                                </button>
+                                            )}
+                                            {block.language && (
+                                                <div className="bg-white/5 px-3 py-1 text-[10px] text-gray-400 font-semibold font-mono border-b border-white/5 flex items-center justify-between">
+                                                    <span>{block.language.toUpperCase()}</span>
+                                                    {!block.isComplete && isGenerating && (
+                                                        <span className="text-[9px] text-blue-400 animate-pulse font-sans font-bold uppercase tracking-wider">
+                                                            Generating...
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            )}
+                                            <div className="overflow-x-auto w-full max-w-full text-xs">
+                                                <SyntaxHighlighter
+                                                    PreTag="div"
+                                                    children={block.code.replace(/\n$/, '')}
+                                                    language={block.language || 'text'}
+                                                    style={vscDarkPlus}
+                                                    className="m-0 p-3 text-[12px] font-mono leading-[1.5]"
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </motion.div>
+                )}
+            </AnimatePresence>
+        </div>
+    );
+};
 
 export default function ChatView() {
     const { id } = useParams<{ id: string }>();
@@ -45,8 +347,49 @@ export default function ChatView() {
     const [isListening, setIsListening] = useState(false);
     const [selectedModel, setSelectedModel] = useState('gemini');
     const [activeArtifact, setActiveArtifact] = useState<{code: string, id: string} | null>(null);
+    
+    // Upload Category & Drag-and-Drop States
+    const [isUploadMenuOpen, setIsUploadMenuOpen] = useState(false);
+    const [isDragging, setIsDragging] = useState(false);
+    
+    // Collapsible Thinking Process state
+    const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
+
+    const toggleThought = (msgId: string) => {
+        setExpandedThoughts(prev => ({
+            ...prev,
+            [msgId]: !prev[msgId]
+        }));
+    };
+    
+    // File inputs refs
+    const docInputRef = useRef<HTMLInputElement>(null);
+    const imageInputRef = useRef<HTMLInputElement>(null);
+    const spreadsheetInputRef = useRef<HTMLInputElement>(null);
+    const codeInputRef = useRef<HTMLInputElement>(null);
+    const audioInputRef = useRef<HTMLInputElement>(null);
+
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const chatContainerRef = useRef<HTMLDivElement>(null);
+    const isAtBottomRef = useRef(true);
+    
+    const handleChatScroll = () => {
+        const container = chatContainerRef.current;
+        if (!container) return;
+        const threshold = 100;
+        const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+        isAtBottomRef.current = isNearBottom;
+    };
+
+    // Sandbox upgrades state
+    const [artifactTab, setArtifactTab] = useState<'preview' | 'code' | 'console'>('preview');
+    const [artifactViewport, setArtifactViewport] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
+    const [artifactCode, setArtifactCode] = useState<string>('');
+    const [consoleLogs, setConsoleLogs] = useState<Array<{ level: 'log' | 'warn' | 'error'; text: string; timestamp: string }>>([]);
+
+    // Debounced code for iframe updates to avoid heavy reloads
+    const [debouncedArtifactCode, setDebouncedArtifactCode] = useState<string>('');
 
     // Audio note recording state
     const [isRecordingAudio, setIsRecordingAudio] = useState(false);
@@ -56,6 +399,44 @@ export default function ChatView() {
     const recordingIntervalRef = useRef<any>(null);
 
     const recognitionRef = useRef<any>(null);
+
+    // Sync artifact code state when active artifact changes
+    useEffect(() => {
+        if (activeArtifact) {
+            setArtifactCode(activeArtifact.code);
+            setDebouncedArtifactCode(activeArtifact.code);
+            setConsoleLogs([]);
+            setArtifactTab('preview');
+            setArtifactViewport('desktop');
+        } else {
+            setArtifactCode('');
+            setDebouncedArtifactCode('');
+            setConsoleLogs([]);
+        }
+    }, [activeArtifact]);
+
+    // Debounce the code editor inputs to update the iframe
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            setDebouncedArtifactCode(artifactCode);
+        }, 400); // 400ms is standard for responsive editing updates
+        return () => clearTimeout(timer);
+    }, [artifactCode]);
+
+    // Handle console log postMessage events from iframe
+    useEffect(() => {
+        const handleIframeMessage = (e: MessageEvent) => {
+            if (e.data && e.data.type === 'CONSOLE_LOG') {
+                setConsoleLogs(prev => [...prev, {
+                    level: e.data.level,
+                    text: e.data.text,
+                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                }]);
+            }
+        };
+        window.addEventListener('message', handleIframeMessage);
+        return () => window.removeEventListener('message', handleIframeMessage);
+    }, []);
 
     useEffect(() => {
         if (id) {
@@ -91,8 +472,18 @@ export default function ChatView() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [id]);
 
+    const prevMessagesLength = useRef(0);
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        if (messages.length > prevMessagesLength.current) {
+            isAtBottomRef.current = true;
+            chatContainerRef.current?.scrollTo({
+                top: chatContainerRef.current.scrollHeight,
+                behavior: 'smooth'
+            });
+        } else if (isAtBottomRef.current && chatContainerRef.current) {
+            chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+        prevMessagesLength.current = messages.length;
     }, [messages, isTyping]);
 
     useEffect(() => {
@@ -131,10 +522,7 @@ export default function ChatView() {
         }
     };
 
-    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const files = e.target.files;
-        if (!files || files.length === 0) return;
-
+    const handleFiles = (files: FileList | File[]) => {
         const promises = Array.from(files).map(file => {
             return new Promise<Attachment>((resolve, reject) => {
                 const reader = new FileReader();
@@ -169,8 +557,56 @@ export default function ChatView() {
             .catch(err => {
                 console.error("Error reading files:", err);
             });
+    };
 
+    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        handleFiles(files);
+        
+        // Clear all inputs so user can select the same file again if desired
+        if (docInputRef.current) docInputRef.current.value = '';
+        if (imageInputRef.current) imageInputRef.current.value = '';
+        if (spreadsheetInputRef.current) spreadsheetInputRef.current.value = '';
+        if (codeInputRef.current) codeInputRef.current.value = '';
+        if (audioInputRef.current) audioInputRef.current.value = '';
         if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    const handleDragEnter = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+            setIsDragging(true);
+        }
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const rect = e.currentTarget.getBoundingClientRect();
+        const x = e.clientX;
+        const y = e.clientY;
+        if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) {
+            setIsDragging(false);
+        }
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(false);
+        
+        const files = e.dataTransfer.files;
+        if (files && files.length > 0) {
+            handleFiles(files);
+        }
     };
 
     const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -354,6 +790,8 @@ export default function ChatView() {
         const controller = new AbortController();
         setAbortController(controller);
 
+        const userId = localStorage.getItem('vchat_user_id') || 'default_user';
+
         try {
             const res = await fetch(`http://${window.location.hostname}:5000/api/chats/stream`, {
                 method: 'POST',
@@ -361,7 +799,7 @@ export default function ChatView() {
                     'Content-Type': 'application/json'
                 },
                 signal: controller.signal,
-                body: JSON.stringify({ chatId: id, message: textToSend, attachments: currentAttachments, personality: 'assistant', provider: modelToUse })
+                body: JSON.stringify({ chatId: id, message: textToSend, attachments: currentAttachments, personality: 'assistant', provider: modelToUse, userId })
             });
 
             if (!res.ok) throw new Error('API Error');
@@ -372,7 +810,7 @@ export default function ChatView() {
             let assistantReplyText = '';
             const replyId = Date.now().toString() + 'reply';
 
-            setMessages(prev => [...prev, { _id: replyId, role: 'assistant', content: '' }]);
+            setMessages(prev => [...prev, { _id: replyId, role: 'assistant', content: '', provider: modelToUse }]);
             let lastUpdateTime = Date.now();
 
             while (true) {
@@ -550,20 +988,188 @@ export default function ChatView() {
                 <div className="flex items-end gap-2 md:gap-3 w-full pr-2 md:pr-3">
                     <input 
                         type="file" 
+                        ref={docInputRef} 
+                        className="hidden" 
+                        multiple 
+                        accept="application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,text/*,.txt,.md,.rtf,application/json,.json" 
+                        onChange={handleFileSelect} 
+                    />
+                    <input 
+                        type="file" 
+                        ref={imageInputRef} 
+                        className="hidden" 
+                        multiple 
+                        accept="image/*" 
+                        onChange={handleFileSelect} 
+                    />
+                    <input 
+                        type="file" 
+                        ref={spreadsheetInputRef} 
+                        className="hidden" 
+                        multiple 
+                        accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel,.xls,text/csv,.csv" 
+                        onChange={handleFileSelect} 
+                    />
+                    <input 
+                        type="file" 
+                        ref={codeInputRef} 
+                        className="hidden" 
+                        multiple 
+                        accept=".py,.js,.ts,.tsx,.jsx,.html,.css,.json,.sh,.cpp,.java,.rs,.go,.php,.swift,.kt,.sql" 
+                        onChange={handleFileSelect} 
+                    />
+                    <input 
+                        type="file" 
+                        ref={audioInputRef} 
+                        className="hidden" 
+                        multiple 
+                        accept="audio/*,.mp3,.wav,.webm,.m4a,.ogg" 
+                        onChange={handleFileSelect} 
+                    />
+                    <input 
+                        type="file" 
                         ref={fileInputRef} 
                         className="hidden" 
                         multiple 
                         accept="image/*,application/pdf,.pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,application/vnd.ms-excel,.xls,text/csv,.csv,text/*,.txt,application/json,.json,application/javascript,.js,.py,audio/*,.mp3,.wav,.webm" 
                         onChange={handleFileSelect} 
                     />
-                    <button
-                        type="button"
-                        onClick={() => fileInputRef.current?.click()}
-                        className="p-2.5 md:p-3.5 rounded-full text-gray-400 hover:text-white hover:bg-white/5 transition-all animate-fade-in"
-                        title="Attach files (PDF, Spreadsheets, Images, Audio, Text)"
-                    >
-                        <Paperclip size={20} />
-                    </button>
+                    
+                    <div className="relative">
+                        <button
+                            type="button"
+                            onClick={() => setIsUploadMenuOpen(!isUploadMenuOpen)}
+                            className={`p-2.5 md:p-3.5 rounded-full transition-all duration-200 animate-fade-in ${isUploadMenuOpen ? 'bg-white/10 text-white scale-105' : 'text-gray-400 hover:text-white hover:bg-white/5'}`}
+                            title="Attach files (PDF, Spreadsheets, Images, Audio, Code, Text)"
+                        >
+                            <Paperclip size={20} className={isUploadMenuOpen ? "rotate-45 transition-transform duration-200" : "transition-transform duration-200"} />
+                        </button>
+
+                        <AnimatePresence>
+                            {isUploadMenuOpen && (
+                                <>
+                                    <div 
+                                        className="fixed inset-0 z-40 cursor-default" 
+                                        onClick={() => setIsUploadMenuOpen(false)} 
+                                    />
+                                    <motion.div
+                                        initial={{ opacity: 0, y: 15, scale: 0.95 }}
+                                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                                        exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                                        transition={{ duration: 0.15, ease: "easeOut" }}
+                                        className="absolute bottom-full left-0 mb-3 w-64 rounded-2xl border border-white/10 bg-[#0c0c0e]/95 p-1.5 shadow-[0_10px_40px_rgba(0,0,0,0.8)] backdrop-blur-2xl z-50 flex flex-col gap-0.5"
+                                    >
+                                        <div className="px-3 py-1.5 text-[10px] font-bold text-gray-500 uppercase tracking-wider">
+                                            Upload Options
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setIsUploadMenuOpen(false);
+                                                docInputRef.current?.click();
+                                            }}
+                                            className="flex items-center gap-3 w-full p-2 text-left hover:bg-white/5 rounded-xl transition-all group cursor-pointer"
+                                        >
+                                            <div className="w-8 h-8 rounded-lg bg-red-500/10 flex items-center justify-center shrink-0 text-red-400 group-hover:scale-105 transition-transform duration-250">
+                                                <FileText size={16} />
+                                            </div>
+                                            <div className="flex flex-col min-w-0">
+                                                <span className="text-xs font-semibold text-white/90">Documents & PDFs</span>
+                                                <span className="text-[10px] text-gray-500 truncate">PDF, Word, Text, Markdown</span>
+                                            </div>
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setIsUploadMenuOpen(false);
+                                                imageInputRef.current?.click();
+                                            }}
+                                            className="flex items-center gap-3 w-full p-2 text-left hover:bg-white/5 rounded-xl transition-all group cursor-pointer"
+                                        >
+                                            <div className="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center shrink-0 text-purple-400 group-hover:scale-105 transition-transform duration-250">
+                                                <Image size={16} />
+                                            </div>
+                                            <div className="flex flex-col min-w-0">
+                                                <span className="text-xs font-semibold text-white/90">Images & Photos</span>
+                                                <span className="text-[10px] text-gray-500 truncate">PNG, JPEG, WebP, SVG</span>
+                                            </div>
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setIsUploadMenuOpen(false);
+                                                spreadsheetInputRef.current?.click();
+                                            }}
+                                            className="flex items-center gap-3 w-full p-2 text-left hover:bg-white/5 rounded-xl transition-all group cursor-pointer"
+                                        >
+                                            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center shrink-0 text-emerald-400 group-hover:scale-105 transition-transform duration-250">
+                                                <FileSpreadsheet size={16} />
+                                            </div>
+                                            <div className="flex flex-col min-w-0">
+                                                <span className="text-xs font-semibold text-white/90">Spreadsheets</span>
+                                                <span className="text-[10px] text-gray-500 truncate">Excel files, CSV tables</span>
+                                            </div>
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setIsUploadMenuOpen(false);
+                                                codeInputRef.current?.click();
+                                            }}
+                                            className="flex items-center gap-3 w-full p-2 text-left hover:bg-white/5 rounded-xl transition-all group cursor-pointer"
+                                        >
+                                            <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center shrink-0 text-blue-400 group-hover:scale-105 transition-transform duration-250">
+                                                <Code size={16} />
+                                            </div>
+                                            <div className="flex flex-col min-w-0">
+                                                <span className="text-xs font-semibold text-white/90">Code Files</span>
+                                                <span className="text-[10px] text-gray-500 truncate">Python, JS, TS, HTML, JSON</span>
+                                            </div>
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setIsUploadMenuOpen(false);
+                                                audioInputRef.current?.click();
+                                            }}
+                                            className="flex items-center gap-3 w-full p-2 text-left hover:bg-white/5 rounded-xl transition-all group cursor-pointer"
+                                        >
+                                            <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center shrink-0 text-amber-400 group-hover:scale-105 transition-transform duration-250">
+                                                <Music size={16} />
+                                            </div>
+                                            <div className="flex flex-col min-w-0">
+                                                <span className="text-xs font-semibold text-white/90">Audio Clips</span>
+                                                <span className="text-[10px] text-gray-500 truncate">MP3, WAV, Voice recordings</span>
+                                            </div>
+                                        </button>
+
+                                        <div className="h-[1px] bg-white/5 my-1" />
+
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setIsUploadMenuOpen(false);
+                                                fileInputRef.current?.click();
+                                            }}
+                                            className="flex items-center gap-3 w-full p-2 text-left hover:bg-white/5 rounded-xl transition-all group cursor-pointer"
+                                        >
+                                            <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center shrink-0 text-white/70 group-hover:scale-105 transition-transform duration-250">
+                                                <File size={16} />
+                                            </div>
+                                            <div className="flex flex-col min-w-0">
+                                                <span className="text-xs font-semibold text-white/90">Browse All Files</span>
+                                                <span className="text-[10px] text-gray-500 truncate">Select any generic file</span>
+                                            </div>
+                                        </button>
+                                    </motion.div>
+                                </>
+                            )}
+                        </AnimatePresence>
+                    </div>
                     <button
                         type="button"
                         onClick={toggleListen}
@@ -632,6 +1238,7 @@ export default function ChatView() {
                     className="bg-black/40 text-white/90 border border-white/10 hover:border-white/20 rounded-xl px-2 py-1.5 text-[11px] md:text-xs outline-none focus:border-blue-500 transition-colors backdrop-blur-md cursor-pointer self-center mr-1"
                 >
                     <option value="gemini">✨ Gemini</option>
+                    <option value="gemma-local">💻 Gemma 4 (Local)</option>
                     <option value="offline">🔌 Offline Model</option>
                 </select>
 
@@ -658,9 +1265,59 @@ export default function ChatView() {
         </div>
     );
 
+    const renderDragOverlay = () => (
+        <AnimatePresence>
+            {isDragging && (
+                <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 bg-black/75 backdrop-blur-md z-50 flex flex-col items-center justify-center pointer-events-none"
+                >
+                    <motion.div
+                        initial={{ scale: 0.9, opacity: 0 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        exit={{ scale: 0.9, opacity: 0 }}
+                        transition={{ type: "spring", stiffness: 200, damping: 20 }}
+                        className="max-w-md p-8 rounded-3xl border border-white/10 bg-[#0c0c0e]/80 flex flex-col items-center gap-4 text-center pointer-events-auto shadow-[0_20px_50px_rgba(0,0,0,0.8)] backdrop-blur-xl m-4"
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                    >
+                        <div className="relative w-20 h-20 bg-white/5 rounded-full flex items-center justify-center border border-white/10 shadow-inner">
+                            <motion.div
+                                animate={{ scale: [1, 1.15, 1], opacity: [0.3, 0.6, 0.3] }}
+                                transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+                                className="absolute inset-0 bg-blue-500/10 rounded-full"
+                            />
+                            <UploadCloud size={40} className="text-blue-400 drop-shadow-[0_0_10px_rgba(59,130,246,0.5)]" />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                            <h3 className="text-lg font-bold text-white tracking-tight">Drop files to attach</h3>
+                            <p className="text-xs text-gray-400 max-w-[260px] leading-relaxed">
+                                Release your files here to instantly add them as prompt attachments.
+                            </p>
+                        </div>
+                        <div className="flex flex-wrap justify-center gap-2 mt-2">
+                            <span className="px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/20 text-[10px] text-red-400 font-semibold tracking-wider uppercase text-center">PDF / Docs</span>
+                            <span className="px-2.5 py-1 rounded-lg bg-purple-500/10 border border-purple-500/20 text-[10px] text-purple-400 font-semibold tracking-wider uppercase text-center">Images</span>
+                            <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-[10px] text-emerald-400 font-semibold tracking-wider uppercase text-center">Excel / CSV</span>
+                            <span className="px-2.5 py-1 rounded-lg bg-blue-500/10 border border-blue-500/20 text-[10px] text-blue-400 font-semibold tracking-wider uppercase text-center">Code</span>
+                        </div>
+                    </motion.div>
+                </motion.div>
+            )}
+        </AnimatePresence>
+    );
+
     if (!id) {
         return (
-            <div className="flex-1 flex flex-col bg-[#050505] text-white relative overflow-hidden h-full">
+            <div 
+                className="flex-1 flex flex-col bg-[#050505] text-white relative overflow-hidden h-full"
+                onDragEnter={handleDragEnter}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+            >
                 {/* Animated Futuristic Background */}
                 <motion.div 
                     animate={{ 
@@ -813,15 +1470,26 @@ export default function ChatView() {
                 </motion.div>
                 </div>
                 {renderInputArea(false)}
+                {renderDragOverlay()}
             </div>
         );
     }
 
     return (
-        <div className="flex-1 flex h-full w-full bg-[#050505] text-white relative overflow-hidden">
+        <div 
+            className="flex-1 flex h-full w-full bg-[#050505] text-white relative overflow-hidden"
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+        >
             {/* Chat Area */}
             <div className={`flex flex-col h-full transition-all duration-500 z-10 ${activeArtifact ? 'w-full md:w-[45%] lg:w-[40%] xl:w-[35%] border-r border-white/10 bg-[#050505]/95 backdrop-blur-xl shrink-0' : 'w-full'}`}>
-                <div className="flex-1 overflow-y-auto px-2 md:px-0 scrollbar-hide pt-4 md:pt-8 min-h-0 w-full flex flex-col">
+                <div 
+                    ref={chatContainerRef}
+                    onScroll={handleChatScroll}
+                    className="flex-1 overflow-y-auto px-2 md:px-0 scrollbar-hide pt-4 md:pt-8 min-h-0 w-full flex flex-col"
+                >
                     <div className={`flex-1 ${activeArtifact ? 'w-full px-4 md:px-6' : 'max-w-3xl mx-auto w-full px-2 md:px-0'} space-y-6 md:space-y-8 flex flex-col transition-all duration-500`}>
                     {messages.length === 0 ? (
                         <div className="flex-1 flex flex-col items-center justify-center my-auto pt-32 opacity-60">
@@ -971,70 +1639,37 @@ export default function ChatView() {
                                             </div>
                                         )}
 
-                                        <div className={`prose prose-invert max-w-none break-words overflow-x-auto min-w-0 ${isTyping && msg.role === 'assistant' && index === messages.length - 1 ? 'typing-active' : ''} ${msg.role === 'user' ? 'text-[15px] md:text-[15.5px] text-white font-medium tracking-wide' : 'text-[15px] md:text-[16px] leading-[1.7] md:leading-[1.8] text-gray-200 prose-headings:text-white prose-headings:font-semibold prose-strong:text-white prose-a:text-blue-400 prose-code:text-blue-300'}`}>
-                                            {msg.content === '' && isTyping ? (
-                                                <div className="flex items-center gap-4 py-4 opacity-90 pl-2">
-                                                    <div className="relative w-7 h-7 flex items-center justify-center">
-                                                        <VLogo className="w-3.5 h-3.5 text-blue-400 drop-shadow-[0_0_10px_rgba(59,130,246,1)] z-10 animate-pulse" />
-                                                        <motion.div
-                                                            animate={{ rotate: 360 }}
-                                                            transition={{ duration: 1.2, repeat: Infinity, ease: "linear" }}
-                                                            className="absolute inset-0 rounded-full border-[2px] border-transparent border-t-blue-500 drop-shadow-[0_0_8px_rgba(59,130,246,0.6)]"
-                                                        />
-                                                    </div>
-                                                    <div className="flex items-center gap-1.5 bg-white/5 px-4 py-2 rounded-full border border-white/10 shadow-[0_0_15px_rgba(59,130,246,0.15)]">
-                                                        <span className="text-sm text-blue-400 font-medium tracking-wider uppercase text-[11px]">Thinking</span>
-                                                        <div className="flex gap-1 ml-1 items-center">
-                                                            <motion.span animate={{ opacity: [0.3, 1, 0.3], scale: [0.8, 1.2, 0.8] }} transition={{ duration: 1.5, repeat: Infinity, delay: 0 }} className="w-1.5 h-1.5 bg-blue-400 rounded-full"></motion.span>
-                                                            <motion.span animate={{ opacity: [0.3, 1, 0.3], scale: [0.8, 1.2, 0.8] }} transition={{ duration: 1.5, repeat: Infinity, delay: 0.2 }} className="w-1.5 h-1.5 bg-blue-400 rounded-full"></motion.span>
-                                                            <motion.span animate={{ opacity: [0.3, 1, 0.3], scale: [0.8, 1.2, 0.8] }} transition={{ duration: 1.5, repeat: Infinity, delay: 0.4 }} className="w-1.5 h-1.5 bg-blue-400 rounded-full"></motion.span>
+                                        {msg.role === 'assistant' && (() => {
+                                            const parsed = parseMessageContent(msg.content);
+                                            return (
+                                                <>
+                                                    <ThinkingProcess 
+                                                        msgId={msg._id} 
+                                                        model={msg.provider || selectedModel} 
+                                                        isGenerating={isTyping && index === messages.length - 1} 
+                                                        contentLength={msg.content.length}
+                                                        expandedThoughts={expandedThoughts}
+                                                        toggleThought={toggleThought}
+                                                        codeBlocks={parsed.codeBlocks}
+                                                        setActiveArtifact={setActiveArtifact}
+                                                    />
+                                                    
+                                                    {parsed.text !== '' && (
+                                                        <div className={`prose prose-invert max-w-none break-words overflow-x-auto min-w-0 ${isTyping && index === messages.length - 1 ? (selectedModel === 'gemini' ? 'typing-active typing-active-gemini' : selectedModel === 'gemma-local' ? 'typing-active typing-active-claude' : 'typing-active typing-active-chatgpt') : ''} text-[15px] md:text-[16px] leading-[1.7] md:leading-[1.8] text-gray-200 prose-headings:text-white prose-headings:font-semibold prose-strong:text-white prose-a:text-blue-400 prose-code:text-blue-300`}>
+                                                            <ReactMarkdown>
+                                                                {parsed.text}
+                                                            </ReactMarkdown>
                                                         </div>
-                                                    </div>
-                                                </div>
-                                            ) : (
-                                                msg.role === 'user' ? msg.content :
-                                                    <ReactMarkdown
-                                                        components={{
-                                                            code(props) {
-                                                                const { children, className, node, ref, ...rest } = props
-                                                                const match = /language-(\w+)/.exec(className || '')
-                                                                const isHtml = match && match[1] === 'html';
-                                                                return match ? (
-                                                                    <div 
-                                                                        className="relative group/code my-6 overflow-hidden max-w-full"
-                                                                    >
-                                                                        {isHtml && (
-                                                                            <button
-                                                                                onClick={() => setActiveArtifact({ code: String(children), id: Date.now().toString() })}
-                                                                                className="absolute top-3 right-3 z-20 opacity-0 group-hover/code:opacity-100 transition-opacity bg-blue-600/90 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5 shadow-lg font-medium backdrop-blur-md border border-blue-400/30"
-                                                                            >
-                                                                                <Layout size={14} />
-                                                                                Preview UI
-                                                                            </button>
-                                                                        )}
-                                                                        <div className="overflow-x-auto w-full max-w-full">
-                                                                            <SyntaxHighlighter
-                                                                                {...rest}
-                                                                                PreTag="div"
-                                                                                children={String(children).replace(/\n$/, '')}
-                                                                                language={match[1]}
-                                                                                style={vscDarkPlus}
-                                                                                className="rounded-[16px] m-0 border border-white/10 shadow-2xl text-[13px] md:text-[14px] min-w-max"
-                                                                            />
-                                                                        </div>
-                                                                    </div>
-                                                                ) : (
-                                                                    <code {...rest} className={className + " bg-white/10 text-gray-200 rounded-md px-1.5 py-0.5 text-[14.5px]"}>
-                                                                        {children}
-                                                                    </code>
-                                                                )
-                                                            }
-                                                        }}
-                                                    >
-                                                        {msg.content}
-                                                    </ReactMarkdown>
-                                            )}
-                                        </div>
+                                                    )}
+                                                </>
+                                            );
+                                        })()}
+
+                                        {msg.role === 'user' && (
+                                            <div className="prose prose-invert max-w-none break-words overflow-x-auto min-w-0 text-[15px] md:text-[15.5px] text-white font-medium tracking-wide">
+                                                {msg.content}
+                                            </div>
+                                        )}
                                     </div>
                                 </motion.div>
                             ))}
@@ -1055,67 +1690,312 @@ export default function ChatView() {
                         animate={{ opacity: 1, x: 0, scale: 1 }}
                         exit={{ opacity: 0, x: 100, scale: 0.95 }}
                         transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-                        className="hidden md:flex flex-1 h-full bg-[#0A0A0A] relative flex-col z-0 shadow-[-20px_0_50px_rgba(0,0,0,0.5)]"
+                        className="hidden md:flex flex-1 h-full bg-[#0A0A0A] relative flex-col z-0 shadow-[-20px_0_50px_rgba(0,0,0,0.5)] min-w-0"
                     >
                         {/* Header */}
-                        <div className="h-14 bg-gradient-to-r from-[#0f0f0f] to-[#111] border-b border-white/10 flex items-center justify-between px-5 shrink-0 z-10 shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
-                            <div className="flex items-center gap-3">
-                                <div className="p-1.5 bg-blue-500/20 rounded-lg border border-blue-500/30">
-                                    <Layout size={14} className="text-blue-400" />
+                        <div className="h-14 bg-gradient-to-r from-[#0f0f0f] to-[#111] border-b border-white/10 flex items-center justify-between px-4 shrink-0 z-10 shadow-[0_4px_20px_rgba(0,0,0,0.3)] gap-2">
+                            {/* Left Side: Tabs */}
+                            <div className="flex items-center gap-1.5 md:gap-3">
+                                <button
+                                    onClick={() => setArtifactTab('preview')}
+                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs md:text-sm font-semibold transition-all border ${
+                                        artifactTab === 'preview'
+                                            ? 'bg-blue-600/20 text-blue-400 border-blue-500/30'
+                                            : 'text-gray-400 border-transparent hover:bg-white/5 hover:text-white'
+                                    }`}
+                                >
+                                    <Eye size={14} />
+                                    <span className="hidden sm:inline">Preview</span>
+                                </button>
+                                <button
+                                    onClick={() => setArtifactTab('code')}
+                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs md:text-sm font-semibold transition-all border ${
+                                        artifactTab === 'code'
+                                            ? 'bg-blue-600/20 text-blue-400 border-blue-500/30'
+                                            : 'text-gray-400 border-transparent hover:bg-white/5 hover:text-white'
+                                    }`}
+                                >
+                                    <Code size={14} />
+                                    <span className="hidden sm:inline">Code</span>
+                                </button>
+                                <button
+                                    onClick={() => setArtifactTab('console')}
+                                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs md:text-sm font-semibold transition-all border relative ${
+                                        artifactTab === 'console'
+                                            ? 'bg-blue-600/20 text-blue-400 border-blue-500/30'
+                                            : 'text-gray-400 border-transparent hover:bg-white/5 hover:text-white'
+                                    }`}
+                                >
+                                    <Terminal size={14} />
+                                    <span className="hidden sm:inline">Console</span>
+                                    {consoleLogs.length > 0 && (
+                                        <span className={`absolute -top-1.5 -right-1.5 flex h-4 min-w-4 px-1 items-center justify-center rounded-full text-[9px] font-bold ${
+                                            consoleLogs.some(log => log.level === 'error')
+                                                ? 'bg-red-500 text-white'
+                                                : consoleLogs.some(log => log.level === 'warn')
+                                                    ? 'bg-yellow-500 text-black'
+                                                    : 'bg-blue-500 text-white'
+                                        }`}>
+                                            {consoleLogs.length}
+                                        </span>
+                                    )}
+                                </button>
+                            </div>
+
+                            {/* Center Side: Viewport Selector */}
+                            {artifactTab === 'preview' && (
+                                <div className="flex items-center bg-black/40 border border-white/10 rounded-xl p-0.5 z-10 shrink-0">
+                                    <button
+                                        onClick={() => setArtifactViewport('desktop')}
+                                        className={`p-1.5 rounded-lg transition-all ${
+                                            artifactViewport === 'desktop' ? 'bg-white/10 text-white shadow-sm' : 'text-gray-400 hover:text-white'
+                                        }`}
+                                        title="Desktop View"
+                                    >
+                                        <Monitor size={14} />
+                                    </button>
+                                    <button
+                                        onClick={() => setArtifactViewport('tablet')}
+                                        className={`p-1.5 rounded-lg transition-all ${
+                                            artifactViewport === 'tablet' ? 'bg-white/10 text-white shadow-sm' : 'text-gray-400 hover:text-white'
+                                        }`}
+                                        title="Tablet View"
+                                    >
+                                        <Tablet size={14} />
+                                    </button>
+                                    <button
+                                        onClick={() => setArtifactViewport('mobile')}
+                                        className={`p-1.5 rounded-lg transition-all ${
+                                            artifactViewport === 'mobile' ? 'bg-white/10 text-white shadow-sm' : 'text-gray-400 hover:text-white'
+                                        }`}
+                                        title="Mobile View"
+                                    >
+                                        <Smartphone size={14} />
+                                    </button>
                                 </div>
-                                <span className="text-sm font-semibold tracking-wide text-gray-200">Generative UI Preview</span>
+                            )}
+
+                            {/* Right Side: Actions (Download, Copy, Close) */}
+                            <div className="flex items-center gap-1.5 shrink-0 z-10">
+                                <button
+                                    onClick={() => {
+                                        navigator.clipboard.writeText(artifactCode);
+                                        alert("Artifact code copied to clipboard!");
+                                    }}
+                                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors border border-transparent hover:border-white/10"
+                                    title="Copy Code"
+                                >
+                                    <Copy size={15} />
+                                </button>
+                                <button
+                                    onClick={() => {
+                                        const blob = new Blob([artifactCode], { type: 'text/html' });
+                                        const url = URL.createObjectURL(blob);
+                                        const a = document.createElement('a');
+                                        a.href = url;
+                                        a.download = `artifact_${activeArtifact ? activeArtifact.id : Date.now()}.html`;
+                                        document.body.appendChild(a);
+                                        a.click();
+                                        document.body.removeChild(a);
+                                        URL.revokeObjectURL(url);
+                                    }}
+                                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors border border-transparent hover:border-white/10"
+                                    title="Download HTML"
+                                >
+                                    <Download size={15} />
+                                </button>
+                                <div className="h-6 w-[1px] bg-white/10 mx-1"></div>
+                                <button
+                                    onClick={() => setActiveArtifact(null)}
+                                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors border border-transparent hover:border-white/10"
+                                    title="Close Preview"
+                                >
+                                    <X size={16} />
+                                </button>
                             </div>
-                            <button
-                                onClick={() => setActiveArtifact(null)}
-                                className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors border border-transparent hover:border-white/10"
-                            >
-                                <X size={16} />
-                            </button>
                         </div>
-                        {/* Iframe Box */}
-                        <div className="flex-1 w-full bg-[#050505] p-2 md:p-4">
-                            <div className="w-full h-full rounded-[20px] overflow-hidden border border-white/10 shadow-[0_0_30px_rgba(0,0,0,0.5)] bg-[#050505] relative">
-                                <iframe
-                                    key={activeArtifact.id}
-                                    title="Preview"
-                                    className="absolute inset-0 w-full h-full border-none bg-transparent"
-                                    sandbox="allow-scripts allow-modals allow-forms allow-popups allow-same-origin"
-                                    srcDoc={`
-                                        <!DOCTYPE html>
-                                        <html class="dark">
-                                            <head>
-                                                <meta charset="UTF-8">
-                                                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                                                <script src="https://cdn.tailwindcss.com"></script>
-                                                <script>
-                                                    tailwind.config = {
-                                                        darkMode: 'class',
-                                                        theme: {
-                                                            extend: {}
+
+                        {/* Panels Content Area */}
+                        {artifactTab === 'preview' && (
+                            <div className="flex-1 w-full bg-[#050505] p-2 md:p-4 overflow-y-auto flex justify-center items-center relative min-h-0">
+                                <div 
+                                    className={`h-full transition-all duration-300 relative shadow-[0_0_50px_rgba(0,0,0,0.8)] flex flex-col ${
+                                        artifactViewport === 'desktop' 
+                                            ? 'w-full rounded-[20px] border border-white/10 overflow-hidden' 
+                                            : artifactViewport === 'tablet'
+                                                ? 'w-[768px] rounded-[24px] border-4 border-white/20 overflow-hidden'
+                                                : 'w-[375px] rounded-[36px] border-8 border-white/20 overflow-hidden'
+                                    }`}
+                                >
+                                    {artifactViewport !== 'desktop' && (
+                                        <div className="absolute top-0 left-0 right-0 h-4 bg-white/5 border-b border-white/10 flex items-center justify-center text-[9px] text-white/40 tracking-wider font-semibold pointer-events-none select-none z-30">
+                                            {artifactViewport === 'tablet' ? 'TABLET VIEW (768px)' : 'MOBILE VIEW (375px)'}
+                                        </div>
+                                    )}
+                                    <iframe
+                                        key={activeArtifact.id + '-' + debouncedArtifactCode.length}
+                                        title="Preview"
+                                        className={`w-full h-full border-none bg-transparent ${artifactViewport !== 'desktop' ? 'pt-4' : ''}`}
+                                        sandbox="allow-scripts allow-modals allow-forms allow-popups allow-same-origin"
+                                        srcDoc={`
+                                            <!DOCTYPE html>
+                                            <html class="dark">
+                                                <head>
+                                                    <meta charset="UTF-8">
+                                                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                                                    <script>
+                                                        (function() {
+                                                            const originalConsole = {
+                                                                log: console.log,
+                                                                warn: console.warn,
+                                                                error: console.error
+                                                            };
+
+                                                            function sendLog(level, args) {
+                                                                const text = args.map(arg => {
+                                                                    if (typeof arg === 'object') {
+                                                                        try {
+                                                                            return JSON.stringify(arg);
+                                                                        } catch (e) {
+                                                                            return String(arg);
+                                                                        }
+                                                                    }
+                                                                    return String(arg);
+                                                                }).join(' ');
+
+                                                                window.parent.postMessage({
+                                                                    type: 'CONSOLE_LOG',
+                                                                    level: level,
+                                                                    text: text
+                                                                }, '*');
+                                                            }
+
+                                                            console.log = function(...args) {
+                                                                sendLog('log', args);
+                                                                originalConsole.log.apply(console, args);
+                                                            };
+                                                            console.warn = function(...args) {
+                                                                sendLog('warn', args);
+                                                                originalConsole.warn.apply(console, args);
+                                                            };
+                                                            console.error = function(...args) {
+                                                                sendLog('error', args);
+                                                                originalConsole.error.apply(console, args);
+                                                            };
+
+                                                            window.onerror = function(message, source, lineno, colno, error) {
+                                                                window.parent.postMessage({
+                                                                    type: 'CONSOLE_LOG',
+                                                                    level: 'error',
+                                                                    text: message + ' (at line ' + lineno + ':' + colno + ')'
+                                                                }, '*');
+                                                                return false;
+                                                            };
+                                                        })();
+                                                    </script>
+                                                    <script src="https://cdn.tailwindcss.com"></script>
+                                                    <script>
+                                                        tailwind.config = {
+                                                            darkMode: 'class',
+                                                            theme: {
+                                                                extend: {}
+                                                            }
                                                         }
-                                                    }
-                                                </script>
-                                                <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-                                                <style>
-                                                    /* Base styles to prevent unwanted scrollbars and force dark theme baseline */
-                                                    body { margin: 0; min-height: 100vh; background: #050505; color: white; display: flex; flex-direction: column; overflow-x: hidden; }
-                                                    ::-webkit-scrollbar { width: 8px; height: 8px; }
-                                                    ::-webkit-scrollbar-track { background: transparent; }
-                                                    ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
-                                                    ::-webkit-scrollbar-thumb:hover { background: #555; }
-                                                </style>
-                                            </head>
-                                            <body class="antialiased">
-                                                ${activeArtifact.code}
-                                            </body>
-                                        </html>
-                                    `}
-                                />
+                                                    </script>
+                                                    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+                                                    <style>
+                                                        /* Base styles to prevent unwanted scrollbars and force dark theme baseline */
+                                                        body { margin: 0; min-height: 100vh; background: #050505; color: white; display: flex; flex-direction: column; overflow-x: hidden; }
+                                                        ::-webkit-scrollbar { width: 8px; height: 8px; }
+                                                        ::-webkit-scrollbar-track { background: transparent; }
+                                                        ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+                                                        ::-webkit-scrollbar-thumb:hover { background: #555; }
+                                                    </style>
+                                                </head>
+                                                <body class="antialiased font-sans">
+                                                    ${debouncedArtifactCode}
+                                                </body>
+                                            </html>
+                                        `}
+                                    />
+                                </div>
                             </div>
-                        </div>
+                        )}
+
+                        {artifactTab === 'code' && (
+                            <div className="flex-1 w-full bg-[#050505] p-3 md:p-5 flex flex-col min-h-0">
+                                <div className="flex items-center justify-between mb-3 shrink-0">
+                                    <span className="text-xs text-gray-500 font-semibold uppercase tracking-wider">Source Code Editor</span>
+                                    <span className="text-[10px] text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-full border border-blue-500/20 font-medium">Auto-Syncs with Preview</span>
+                                </div>
+                                <LineNumberTextarea value={artifactCode} onChange={setArtifactCode} />
+                            </div>
+                        )}
+
+                        {artifactTab === 'console' && (
+                            <div className="flex-1 w-full bg-[#050505] p-3 md:p-5 flex flex-col min-h-0">
+                                <div className="flex items-center justify-between mb-3 shrink-0">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs text-gray-500 font-semibold uppercase tracking-wider">Developer Console</span>
+                                        <span className="text-[10px] bg-white/5 border border-white/10 px-2 py-0.5 rounded-full text-white/60 font-mono">Capture Mode Active</span>
+                                    </div>
+                                    {consoleLogs.length > 0 && (
+                                        <button
+                                            onClick={() => setConsoleLogs([])}
+                                            className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-red-400 transition-colors bg-white/5 px-2.5 py-1 rounded-lg border border-white/5 hover:border-red-500/20"
+                                        >
+                                            <Trash2 size={12} />
+                                            Clear
+                                        </button>
+                                    )}
+                                </div>
+                                <div className="flex-1 bg-[#020202] border border-white/10 rounded-2xl p-4 font-mono text-[13px] leading-[1.6] overflow-y-auto shadow-inner text-gray-300">
+                                    {consoleLogs.length === 0 ? (
+                                        <div className="h-full flex flex-col items-center justify-center text-center opacity-40 select-none py-10">
+                                            <Terminal size={24} className="mb-2 text-gray-500 animate-pulse" />
+                                            <p className="text-xs">No logs captured yet.</p>
+                                            <p className="text-[10px] max-w-xs mt-1">Console statements or Javascript runtime errors in your preview will appear here in real-time.</p>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-2.5">
+                                            {consoleLogs.map((log, idx) => {
+                                                const isError = log.level === 'error';
+                                                const isWarn = log.level === 'warn';
+                                                
+                                                return (
+                                                    <div 
+                                                        key={idx} 
+                                                        className="flex gap-3 items-start border-b border-white/5 pb-2 last:border-b-0 animate-fade-in"
+                                                    >
+                                                        <span className="text-[10px] text-gray-600 select-none tracking-tight shrink-0 mt-0.5">
+                                                            [{log.timestamp}]
+                                                        </span>
+                                                        <span className={`text-[10px] uppercase font-bold shrink-0 select-none px-1.5 py-0.5 rounded ${
+                                                            isError 
+                                                                ? 'bg-red-500/10 text-red-500 border border-red-500/20' 
+                                                                : isWarn 
+                                                                    ? 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20' 
+                                                                    : 'bg-blue-500/10 text-blue-400 border border-blue-500/20'
+                                                        }`}>
+                                                            {log.level}
+                                                        </span>
+                                                        <pre className={`flex-1 whitespace-pre-wrap font-mono break-all text-[12px] ${
+                                                            isError ? 'text-red-400 font-medium' : isWarn ? 'text-yellow-300' : 'text-gray-300'
+                                                        }`}>
+                                                            {log.text}
+                                                        </pre>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
                     </motion.div>
                 )}
             </AnimatePresence>
+            {renderDragOverlay()}
         </div>
     );
 }
