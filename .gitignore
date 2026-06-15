@@ -1,0 +1,67 @@
+# Root gitignore for V-CHAT project
+
+# Dependency directories
+node_modules/
+**/node_modules/
+
+# Local databases and JSON storage files
+backend/localDB.json
+backend/offlineBrain.json
+offlineBrain.json
+*.db
+*.sqlite
+
+# Environment configuration files
+.env
+.env.*
+!.env.example
+**/ .env
+**/ .env.*
+
+# Build and production output
+dist/
+**/dist/
+dist-ssr/
+**/dist-ssr/
+build/
+**/build/
+out/
+**/out/
+
+# Development / Scratch / Temporary files
+backend/scratch/
+backend/scratch-*
+**/scratch/
+**/*.tmp
+**/*.temp
+
+# Log files
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor and IDE directories / files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.project
+.classpath
+.settings/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Zip archives and distribution packages
+*.zip
+*.tar.gz
+*.tgz
+chat_always_project.zip

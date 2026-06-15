@@ -1,4 +1,4 @@
-node_modules
+node_modules/
 .env
 .env.*
 !.env.example
@@ -7,3 +7,6 @@ __pycache__/
 localDB.json
 offlineBrain.json
 
+# Scratch scripts and test files
+scratch/
+scratch-*
